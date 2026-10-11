@@ -1,0 +1,13 @@
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\CustomQuestGuide.deps.json
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\CustomQuestGuide.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.csproj.AssemblyReference.cache
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.GeneratedMSBuildEditorConfig.editorconfig
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.AssemblyInfoInputs.cache
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.AssemblyInfo.cs
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.csproj.CoreCompileInputs.cache
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQuestGuide.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\CSVFile.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\CsvHelper.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\LuminaSupplemental.Excel.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\Sylvan.Data.Csv.dll
+D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQu.83D7696E.Up2Date

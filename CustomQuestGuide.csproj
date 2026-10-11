@@ -1,0 +1,19 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.52.1.0</Version>
+    <Description>Target-oriented acquisition, pinning, and formal class/job progression guidance for FFXIV.</Description>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    LuminaSupplemental contains community-maintained data that the game itself
+    does not ship, including duty drops, Mog Station / Square Enix Store items,
+    and unobtainable items.
+
+    We intentionally load its CSV resources through reflection at runtime so the
+    core plugin is not tightly coupled to the package's model namespaces.
+  -->
+  <ItemGroup>
+    <PackageReference Include="LuminaSupplemental.Excel" Version="5.1.5" />
+  </ItemGroup>
+</Project>

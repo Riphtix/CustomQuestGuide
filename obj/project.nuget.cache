@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "dgSpecHash": "IGil/n6/iz0=",
+  "success": true,
+  "projectFilePath": "D:\\Util\\Downloads\\CustomQuestGuide-simple-v0.1\\CustomQuestGuide-simple\\CustomQuestGuide.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\cmriv\\.nuget\\packages\\csvfile\\3.2.1\\csvfile.3.2.1.nupkg.sha512",
+    "C:\\Users\\cmriv\\.nuget\\packages\\csvhelper\\30.0.1\\csvhelper.30.0.1.nupkg.sha512",
+    "C:\\Users\\cmriv\\.nuget\\packages\\dalamudpackager\\15.0.0\\dalamudpackager.15.0.0.nupkg.sha512",
+    "C:\\Users\\cmriv\\.nuget\\packages\\dotnet.reproduciblebuilds\\1.2.39\\dotnet.reproduciblebuilds.1.2.39.nupkg.sha512",
+    "C:\\Users\\cmriv\\.nuget\\packages\\luminasupplemental.excel\\5.1.5\\luminasupplemental.excel.5.1.5.nupkg.sha512",
+    "C:\\Users\\cmriv\\.nuget\\packages\\sylvan.data.csv\\1.4.3\\sylvan.data.csv.1.4.3.nupkg.sha512"
+  ],
+  "logs": []
+}

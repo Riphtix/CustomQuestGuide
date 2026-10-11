@@ -1,0 +1,23 @@
+{
+  "Author": "Local Dev",
+  "Name": "Custom Quest Guide",
+  "InternalName": "CustomQuestGuide",
+  "AssemblyVersion": "0.52.1.0",
+  "Description": "Target-oriented acquisition, prerequisite, pinning, and formal class/job progression guidance for FFXIV.",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "items",
+    "quests",
+    "guide",
+    "unlock",
+    "relic",
+    "loot"
+  ],
+  "DalamudApiLevel": 15,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": false,
+  "LoadPriority": 0,
+  "Punchline": "Pin and prioritize item, set, and class/job progression targets with acquisition guidance.",
+  "AcceptsFeedback": true
+}
