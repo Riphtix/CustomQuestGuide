@@ -47,6 +47,7 @@ public sealed class CollectibleSourceIndex : IDisposable
     };
 
     private readonly IPluginLog log;
+    private readonly NetworkRequestTracker networkRequests;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private readonly CancellationTokenSource disposeCts = new();
 
@@ -63,9 +64,11 @@ public sealed class CollectibleSourceIndex : IDisposable
     public string Status { get; private set; } = "Not loaded";
     public int ResolvedItemCount => sources.Count;
 
-    public CollectibleSourceIndex(IPluginLog log)
+    public CollectibleSourceIndex(IPluginLog log, NetworkRequestTracker networkRequests)
     {
         this.log = log;
+        this.networkRequests = networkRequests;
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomQuestGuide/1.1.13");
     }
 
     public void BindTargets(IEnumerable<TargetEntry> targets)
@@ -243,13 +246,16 @@ public sealed class CollectibleSourceIndex : IDisposable
         // returned list still gives us the most current records rather than
         // failing plugin startup.
         var url = $"https://ffxivcollect.com/api/{endpoint}?limit=5000";
+        networkRequests.Request("FFXIV Collect");
         using var response = await http.GetAsync(url, cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
+            networkRequests.Failure("FFXIV Collect");
             log.Warning($"CQG FFXIV Collect request failed: {endpoint} -> {(int)response.StatusCode}");
             return false;
         }
+        networkRequests.Success("FFXIV Collect");
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream);
@@ -487,6 +493,17 @@ public sealed class CollectibleSourceIndex : IDisposable
             return uint.TryParse(raw.GetString(), out value);
 
         return false;
+    }
+
+    public bool ClearSessionCache()
+    {
+        if (IsLoading)
+            return false;
+
+        sources.Clear();
+        IsLoaded = false;
+        Status = "Not loaded";
+        return true;
     }
 
     public void Dispose()

@@ -12,14 +12,14 @@ using System.Reflection;
 
 [assembly: System.Reflection.AssemblyCompanyAttribute("CustomQuestGuide")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
-[assembly: System.Reflection.AssemblyDescriptionAttribute(("Target-oriented acquisition, pinning, and formal class/job progression guidance f" +
-    "or FFXIV."))]
-[assembly: System.Reflection.AssemblyFileVersionAttribute("0.52.1.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.52.1.0")]
+[assembly: System.Reflection.AssemblyDescriptionAttribute(("Target-oriented acquisition, pinning, ownership, and formal class/job progression" +
+    " guidance for FFXIV."))]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.1.13.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.1.13+72c5e270c605223122524c5f2c77d68334882812")]
 [assembly: System.Reflection.AssemblyProductAttribute("CustomQuestGuide")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CustomQuestGuide")]
-[assembly: System.Reflection.AssemblyVersionAttribute("0.52.1.0")]
-[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.1.13.0")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://github.com/Riphtix/CustomQuestGuide")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]
 

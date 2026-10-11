@@ -41,6 +41,11 @@ public sealed class OwnershipIndex
     private readonly Dictionary<uint, uint> orchestrionByItem = [];
     private readonly Dictionary<uint, uint> ornamentByItem = [];
     private readonly HashSet<uint> permanentUnlockCandidateItems = [];
+    private readonly HashSet<uint> explicitPermanentUnlockCandidateItems = [];
+    // ItemAction rows that the game itself has told us do not carry any unlock
+    // state (IsItemActionUnlocked == 4). This is static item metadata, so once
+    // learned it is safe to skip for later /cqg scans in the same plugin session.
+    private readonly HashSet<uint> knownNonUnlockableItemActions = [];
 
     private readonly HashSet<uint> physicalItems = [];
     private readonly HashSet<uint> glamourItems = [];
@@ -50,9 +55,53 @@ public sealed class OwnershipIndex
     private bool hasSnapshot;
     private uint[] activePermanentCandidates = Array.Empty<uint>();
     private int permanentCandidateCursor;
-    public double LastPollDurationMs { get; private set; }
+    private ulong snapshotContentId;
+
     public int PermanentCandidateCount => activePermanentCandidates.Length;
     public int PermanentCandidateCursor => permanentCandidateCursor;
+    public bool PermanentPollingComplete => permanentCandidateCursor >= activePermanentCandidates.Length;
+
+    /// <summary>
+    /// Clears all cached ownership state for the currently loaded character so the
+    /// next /cqg pass behaves like a cold ownership scan. This intentionally does
+    /// not touch acquisition-source, duty-unlock, or community resolver caches.
+    /// The saved Glamour Dresser snapshot for the current character is also
+    /// removed because it is item-ownership cache; opening the dresser again will
+    /// repopulate it from authoritative live data.
+    /// </summary>
+    public bool ClearCachedOwnershipForCurrentCharacter()
+    {
+        activePermanentCandidates = Array.Empty<uint>();
+        permanentCandidateCursor = 0;
+
+        physicalItems.Clear();
+        glamourItems.Clear();
+        armoireItems.Clear();
+        knownNonUnlockableItemActions.Clear();
+        ownershipSnapshot.Clear();
+        jobUnlockSnapshot.Clear();
+        snapshotContentId = 0;
+        hasSnapshot = false;
+
+        var removedPersistentGlamourSnapshot = false;
+        try
+        {
+            var contentId = playerState.IsLoaded ? playerState.ContentId : 0;
+            if (contentId != 0)
+            {
+                var snapshotKey = contentId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                removedPersistentGlamourSnapshot = config.GlamourDresserSnapshots.Remove(snapshotKey);
+                if (removedPersistentGlamourSnapshot)
+                    saveConfig();
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Could not clear the current character Glamour Dresser ownership snapshot.");
+        }
+
+        return removedPersistentGlamourSnapshot;
+    }
 
     private static readonly GameInventoryType[] PhysicalContainers =
     [
@@ -115,7 +164,7 @@ public sealed class OwnershipIndex
         hasSnapshot && jobUnlockSnapshot.TryGetValue(classJobId, out var unlocked) && unlocked;
 
     /// <summary>
-    /// Returns ownership from the most recent command-triggered polling window.
+    /// Returns ownership from the most recent command-triggered one-shot scan.
     /// Rendering never performs live ownership queries.
     /// </summary>
     public OwnershipStatus GetItemStatus(uint itemId)
@@ -140,28 +189,127 @@ public sealed class OwnershipIndex
     /// unlock scan synchronously. The caller can then advance that scan in small
     /// chunks from subsequent framework updates.
     /// </summary>
-    public void BeginPolling(IEnumerable<uint> itemIds)
+    public void BeginPolling(
+        IEnumerable<uint> selectedItemIds,
+        IEnumerable<uint> pinnedItemIds,
+        IEnumerable<uint> allItemIds)
     {
-        // Keep the last completed/partial snapshot visible while a new polling
-        // window warms up. Clearing here caused every green/pink/blue state to
-        // briefly disappear each time /cqg was used. Individual sources replace
-        // their own captured state as fresh samples arrive.
-        activePermanentCandidates = itemIds
+        // Permanent collection unlocks belong to one character. If the user
+        // switches characters without reloading the plugin, never reuse the prior
+        // character's permanent ownership snapshot.
+        var currentContentId = 0UL;
+        try
+        {
+            currentContentId = playerState.IsLoaded ? playerState.ContentId : 0;
+        }
+        catch
+        {
+            currentContentId = 0;
+        }
+
+        if (snapshotContentId != 0 && currentContentId != 0 && snapshotContentId != currentContentId)
+        {
+            ownershipSnapshot.Clear();
+            jobUnlockSnapshot.Clear();
+            physicalItems.Clear();
+            glamourItems.Clear();
+            armoireItems.Clear();
+            hasSnapshot = false;
+        }
+        if (currentContentId != 0)
+            snapshotContentId = currentContentId;
+
+        // Build a deterministic one-shot priority plan. Visible targets and pins
+        // go first. Irreversible permanent unlocks already known owned do not need
+        // to be re-queried. ItemAction rows previously proven to have no unlock
+        // state are also excluded; that capability result is static for the item.
+        var seen = new HashSet<uint>();
+        var ordered = new List<uint>();
+
+        bool ShouldQueue(uint id)
+        {
+            if (id == 0 || !permanentUnlockCandidateItems.Contains(id))
+                return false;
+            if (knownNonUnlockableItemActions.Contains(id))
+                return false;
+            if (ownershipSnapshot.TryGetValue(id, out var owned) && owned.IsOwned)
+                return false;
+            return true;
+        }
+
+        void AddGroup(IEnumerable<uint> ids)
+        {
+            foreach (var id in ids)
+            {
+                if (!seen.Add(id) || !ShouldQueue(id))
+                    continue;
+                ordered.Add(id);
+            }
+        }
+
+        var all = allItemIds
             .Where(id => id != 0 && permanentUnlockCandidateItems.Contains(id))
             .Distinct()
             .ToArray();
+
+        AddGroup(selectedItemIds);
+        AddGroup(pinnedItemIds);
+        AddGroup(all.Where(id => explicitPermanentUnlockCandidateItems.Contains(id)));
+        AddGroup(all.Where(id => !explicitPermanentUnlockCandidateItems.Contains(id)));
+
+        activePermanentCandidates = ordered.ToArray();
         permanentCandidateCursor = 0;
         hasSnapshot = true;
     }
 
     /// <summary>
-    /// Refresh the inexpensive ownership sources and process only a bounded number
-    /// of permanent-unlock candidates. This keeps /cqg responsive while allowing
-    /// ownership to settle over the command-triggered polling window.
+    /// Moves still-unchecked permanent candidates to the front of the remaining
+    /// one-shot scan. Already-checked candidates are never repeated.
+    /// </summary>
+    public int PromoteCandidates(IEnumerable<uint> itemIds, string reason)
+    {
+        if (PermanentPollingComplete || activePermanentCandidates.Length == 0)
+            return 0;
+
+        var requested = itemIds
+            .Where(id => id != 0 && permanentUnlockCandidateItems.Contains(id))
+            .ToHashSet();
+        if (requested.Count == 0)
+            return 0;
+
+        var prefix = activePermanentCandidates.Take(permanentCandidateCursor);
+        var remaining = activePermanentCandidates.Skip(permanentCandidateCursor).ToArray();
+        var promoted = remaining.Where(requested.Contains).ToArray();
+        if (promoted.Length == 0)
+            return 0;
+
+        var promotedSet = promoted.ToHashSet();
+        activePermanentCandidates = prefix
+            .Concat(promoted)
+            .Concat(remaining.Where(id => !promotedSet.Contains(id)))
+            .ToArray();
+
+        _ = reason; // Reason is retained for call-site readability; no scan profiling is persisted.
+        return promoted.Length;
+    }
+
+    public void FinishPolling()
+    {
+        // One-shot scan completion marker only; no profiling or output is recorded.
+    }
+
+    /// <summary>
+    /// Refresh transient ownership once and process a bounded one-shot slice of
+    /// permanent-unlock candidates. The caller invokes this only while an explicit
+    /// /cqg scan is active; after the queue finishes no ownership work continues.
     /// </summary>
     public unsafe void PollSnapshotStep(IEnumerable<uint> classJobIds, int maxPermanentChecks, bool refreshTransientSources)
     {
         var stopwatch = Stopwatch.StartNew();
+        // Keep ownership work comfortably below a frame. The high candidate cap
+        // prevents an artificial throughput ceiling; the time budget is the real
+        // guardrail.
+        const double permanentSliceBudgetMs = 1.25;
 
         if (refreshTransientSources)
         {
@@ -171,39 +319,47 @@ public sealed class OwnershipIndex
             CaptureJobUnlocks(classJobIds);
         }
 
-        if (activePermanentCandidates.Length > 0 && maxPermanentChecks > 0)
+        if (!PermanentPollingComplete && maxPermanentChecks > 0)
         {
-            var checks = Math.Min(maxPermanentChecks, activePermanentCandidates.Length);
-            for (var i = 0; i < checks; i++)
+            var remaining = activePermanentCandidates.Length - permanentCandidateCursor;
+            var checks = Math.Min(maxPermanentChecks, remaining);
+            for (var i = 0; i < checks && permanentCandidateCursor < activePermanentCandidates.Length; i++)
             {
                 // Keep each framework slice bounded even on machines where one of
-                // the native unlock checks is unexpectedly slow. Transient-source
-                // refreshes are allowed a slightly larger slice because they run
-                // only once every two seconds.
-                if (i > 0 && stopwatch.Elapsed.TotalMilliseconds >= (refreshTransientSources ? 4.0 : 2.0))
+                // the native unlock checks is unexpectedly slow. The overall pass
+                // has no wall-clock timeout; it simply continues on later frames.
+                if (i > 0 && stopwatch.Elapsed.TotalMilliseconds >=
+                    (refreshTransientSources ? 3.0 : permanentSliceBudgetMs))
                     break;
-
-                if (permanentCandidateCursor >= activePermanentCandidates.Length)
-                    permanentCandidateCursor = 0;
 
                 var itemId = activePermanentCandidates[permanentCandidateCursor++];
                 try
                 {
-                    var status = GetPermanentUnlockStatus(itemId);
-                    if (status.IsOwned)
-                        ownershipSnapshot[itemId] = status;
-                    else
+                    var result = GetPermanentUnlockStatus(itemId);
+                    if (!result.HasUnlockStatus)
+                    {
+                        knownNonUnlockableItemActions.Add(itemId);
                         ownershipSnapshot.Remove(itemId);
+                    }
+                    else if (result.Status.IsOwned)
+                    {
+                        ownershipSnapshot[itemId] = result.Status;
+                    }
+                    else
+                    {
+                        ownershipSnapshot.Remove(itemId);
+                    }
                 }
                 catch (Exception ex)
                 {
                     log.Debug(ex, $"Ownership polling failed for item {itemId}.");
                 }
+
             }
+
         }
 
         stopwatch.Stop();
-        LastPollDurationMs = stopwatch.Elapsed.TotalMilliseconds;
     }
 
     private unsafe void CaptureJobUnlocks(IEnumerable<uint> classJobIds)
@@ -235,7 +391,9 @@ public sealed class OwnershipIndex
         }
     }
 
-    private unsafe OwnershipStatus GetPermanentUnlockStatus(uint itemId)
+    private readonly record struct PermanentUnlockCheckResult(OwnershipStatus Status, bool HasUnlockStatus);
+
+    private unsafe PermanentUnlockCheckResult GetPermanentUnlockStatus(uint itemId)
     {
         var player = PlayerState.Instance();
         var uiState = UIState.Instance();
@@ -243,23 +401,23 @@ public sealed class OwnershipIndex
         if (player != null)
         {
             if (mountByItem.TryGetValue(itemId, out var mountId) && mountId != 0 && player->IsMountUnlocked(mountId))
-                return new OwnershipStatus(true, "Mount Guide");
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Mount Guide"), true);
 
             if (orchestrionByItem.TryGetValue(itemId, out var rollId) && rollId != 0 && player->IsOrchestrionRollUnlocked(rollId))
-                return new OwnershipStatus(true, "Orchestrion List");
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Orchestrion List"), true);
 
             if (ornamentByItem.TryGetValue(itemId, out var ornamentId) && ornamentId != 0 && player->IsOrnamentUnlocked(ornamentId))
-                return new OwnershipStatus(true, "Fashion Accessories");
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Fashion Accessories"), true);
         }
 
         if (uiState != null)
         {
             if (minionByItem.TryGetValue(itemId, out var minionId) && minionId != 0 && uiState->IsCompanionUnlocked(minionId))
-                return new OwnershipStatus(true, "Minion Guide");
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Minion Guide"), true);
 
             if (cardByItem.TryGetValue(itemId, out var cardId) && cardId > 0 && cardId <= ushort.MaxValue &&
                 uiState->IsTripleTriadCardUnlocked((ushort)cardId))
-                return new OwnershipStatus(true, "Triple Triad Card List");
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Triple Triad Card List"), true);
 
             // FFXIV exposes one generic check for items whose use permanently
             // registers/unlocks something (hairstyles, emotes and other item-action
@@ -267,11 +425,21 @@ public sealed class OwnershipIndex
             // Keep the named collection checks first so the UI can tell the user
             // exactly where the ownership state came from.
             var itemRow = ExdModule.GetItemRowById(itemId);
-            if (itemRow != null && uiState->IsItemActionUnlocked(itemRow) == 1)
-                return new OwnershipStatus(true, "Registered / Collection Unlock");
+            if (itemRow != null)
+            {
+                var unlockState = uiState->IsItemActionUnlocked(itemRow);
+                if (unlockState == 1)
+                    return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Registered / Collection Unlock"), true);
+                if (unlockState == 2 || unlockState == 3)
+                    return new PermanentUnlockCheckResult(OwnershipStatus.Missing, true);
+                if (unlockState == 4)
+                    return new PermanentUnlockCheckResult(OwnershipStatus.Missing, false);
+            }
         }
 
-        return OwnershipStatus.Missing;
+        // If the relevant game state is temporarily unavailable, keep the item as
+        // unlock-capable so it will be eligible on the next explicit /cqg scan.
+        return new PermanentUnlockCheckResult(OwnershipStatus.Missing, true);
     }
 
     private void CapturePhysicalInventory()
@@ -438,6 +606,12 @@ public sealed class OwnershipIndex
 
                     var data0 = FirstUInt(ReflectionUtil.GetPropertyValue(action, "Data"));
                     var additionalData = ReadItemAdditionalData(item);
+
+                    // These ItemAction IDs are known registration/collection
+                    // actions. They are prioritized ahead of generic capability
+                    // discovery because they are the high-value ownership checks.
+                    if (actionId is 1322 or 853 or 3357 or 25183 or 20086 or 2633 or 1013)
+                        explicitPermanentUnlockCandidateItems.Add(item.RowId);
 
                     switch (actionId)
                     {

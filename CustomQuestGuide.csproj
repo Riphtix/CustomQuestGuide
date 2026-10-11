@@ -1,7 +1,9 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.52.1.0</Version>
-    <Description>Target-oriented acquisition, pinning, and formal class/job progression guidance for FFXIV.</Description>
+    <Version>1.1.13</Version>
+    <AssemblyVersion>1.1.13.0</AssemblyVersion>
+    <FileVersion>1.1.13.0</FileVersion>
+    <Description>Target-oriented acquisition, pinning, ownership, and formal class/job progression guidance for FFXIV.</Description>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 

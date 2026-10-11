@@ -222,13 +222,13 @@
     "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
-    "version": "0.52.1",
+    "version": "1.1.13",
     "restore": {
-      "projectUniqueName": "D:\\Util\\Downloads\\CustomQuestGuide-simple-v0.1\\CustomQuestGuide-simple\\CustomQuestGuide.csproj",
+      "projectUniqueName": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj",
       "projectName": "CustomQuestGuide",
-      "projectPath": "D:\\Util\\Downloads\\CustomQuestGuide-simple-v0.1\\CustomQuestGuide-simple\\CustomQuestGuide.csproj",
+      "projectPath": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj",
       "packagesPath": "C:\\Users\\cmriv\\.nuget\\packages\\",
-      "outputPath": "D:\\Util\\Downloads\\CustomQuestGuide-simple-v0.1\\CustomQuestGuide-simple\\obj\\",
+      "outputPath": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

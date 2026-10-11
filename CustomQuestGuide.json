@@ -1,8 +1,8 @@
 {
-  "Author": "Local Dev",
+  "Author": "Riphtix",
   "Name": "Custom Quest Guide",
-  "Punchline": "Pin and prioritize item, set, and class/job progression targets with acquisition guidance.",
-  "Description": "Target-oriented acquisition, ownership, prerequisite, pinning, and formal class/job progression guidance for FFXIV.",
+  "Punchline": "Track items, sets, jobs, and duties with acquisition and unlock guidance.",
+  "Description": "Target-oriented acquisition, ownership, prerequisite, duty unlock, pinning, and formal class/job progression guidance for FFXIV.",
   "ApplicableVersion": "any",
   "Tags": [
     "items",
@@ -10,6 +10,8 @@
     "guide",
     "unlock",
     "relic",
-    "loot"
-  ]
+    "loot",
+    "duties"
+  ],
+  "AssemblyVersion": "1.1.13.0"
 }

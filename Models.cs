@@ -18,7 +18,16 @@ public sealed record SourceEntry(
     string? Detail = null,
     bool? IsUnlocked = null,
     int Priority = 100,
-    string? SpecificityHint = null);
+    string? SpecificityHint = null,
+    uint? NpcId = null);
+
+
+public sealed record ExchangeDependencyInfo(
+    uint CostItemId,
+    string CostItemName,
+    uint Amount,
+    string ShopName,
+    IReadOnlyList<string> NpcNames);
 
 public sealed record AcquisitionResult(
     TargetEntry Target,

@@ -4,6 +4,10 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Numerics;
+using System.Globalization;
+using System.Text.RegularExpressions;
+using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Command;
 using Dalamud.IoC;
@@ -23,6 +27,49 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly Vector4 GlamourPink = new(1.00f, 0.62f, 0.78f, 1.00f);
     private static readonly Vector4 UnresolvedRed = new(1.00f, 0.30f, 0.30f, 1.00f);
 
+    // Some quest/NPC destinations are interior territories whose own map cannot
+    // accept a normal flag. Route those names to a useful overworld entrance
+    // instead of presenting a dead map button. Keys are the displayed interior
+    // PlaceName; values are standard zone map-link targets.
+    private static readonly Dictionary<string, (string Zone, float X, float Y)> InteriorEntranceFallbacks =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            // ARR / common inn rooms
+            ["The Waking Sands"] = ("Western Thanalan", 11.6f, 13.8f),
+            ["The Rising Stones"] = ("Mor Dhona", 21.9f, 8.8f),
+            ["Dawn's Respite"] = ("Mor Dhona", 21.9f, 8.8f),
+            ["The Roost"] = ("New Gridania", 12.0f, 13.0f),
+            ["Mizzenmast Inn"] = ("Limsa Lominsa Upper Decks", 11.0f, 11.0f),
+            ["The Hourglass"] = ("Ul'dah - Steps of Nald", 11.5f, 9.0f),
+
+            // Heavensward
+            ["Fortemps Manor"] = ("Foundation", 10.2f, 11.5f),
+            ["Cloud Nine"] = ("Foundation", 13.0f, 12.0f),
+
+            // Stormblood
+            ["The House of the Fierce"] = ("Yanxia", 25.3f, 12.7f),
+            ["Kienkan"] = ("The Doman Enclave", 6.6f, 7.1f),
+            ["Bokairo Inn"] = ("Kugane", 9.5f, 7.0f),
+
+            // Shadowbringers
+            ["The Ocular"] = ("The Crystarium", 13.5f, 11.3f),
+            ["The Pendants"] = ("The Crystarium", 12.5f, 16.2f),
+
+            // Endwalker / post-Endwalker
+            ["The Baldesion Annex"] = ("Old Sharlayan", 9.2f, 11.2f),
+            ["Andron"] = ("Old Sharlayan", 9.2f, 11.2f),
+            ["The Andron"] = ("Old Sharlayan", 9.2f, 11.2f),
+            ["The Omphalos"] = ("Mor Dhona", 24.5f, 12.7f),
+            ["Meghaduta Guest Chambers"] = ("Radz-at-Han", 4.2f, 9.6f),
+            ["Estinien's Chambers"] = ("Radz-at-Han", 4.2f, 9.6f),
+
+            // Dawntrail / post-Dawntrail
+            ["The For'ard Cabins"] = ("Tuliyollal", 10.0f, 15.1f),
+            ["The Backroom"] = ("Solution Nine", 11.0f, 3.2f),
+            ["Break Room"] = ("Solution Nine", 11.0f, 3.2f),
+            ["Throne Room"] = ("Solution Nine", 4.3f, 19.0f),
+        };
+
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
@@ -32,14 +79,19 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
     private readonly Configuration config;
+    private readonly NetworkRequestTracker networkRequests;
     private readonly SupplementalCsvIndex supplemental;
     private readonly CollectibleSourceIndex collectibleSources;
     private readonly GarlandSourceIndex garlandSources;
+    private readonly GarlandDutyUnlockIndex garlandDutyUnlocks;
+    private readonly CommunityDutyUnlockIndex communityDutyUnlocks;
     private readonly TargetCatalog catalog;
     private readonly SetCatalog setCatalog;
     private readonly JobProgressionCatalog jobCatalog;
+    private readonly DutyCatalog dutyCatalog;
     private readonly QuestGuidanceIndex questGuidance;
     private readonly OwnershipIndex ownership;
     private readonly NpcLocationIndex npcLocations;
@@ -61,16 +113,15 @@ public sealed class Plugin : IDalamudPlugin
     private string releaseDiagnosticsStatus = string.Empty;
     private bool configPersistenceDisabled;
 
-    // Ownership polling is command-triggered and bounded. /cqg starts a 30-second
-    // window, while each framework sample does only a small amount of work so the
-    // command itself never performs a full ownership scan or causes a visible hitch.
-    private static readonly TimeSpan OwnershipPollingDuration = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan OwnershipPollingInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan OwnershipTransientRefreshInterval = TimeSpan.FromSeconds(2);
-    private const int PermanentUnlockChecksPerPoll = 96;
-    private DateTime ownershipPollingEndsUtc = DateTime.MinValue;
-    private DateTime nextOwnershipPollUtc = DateTime.MaxValue;
-    private DateTime nextOwnershipTransientRefreshUtc = DateTime.MaxValue;
+    // Ownership scanning is command-triggered, one-shot, and incremental. /cqg starts
+    // exactly one full pass. Each queued permanent item and duty is checked at most
+    // once in that pass; transient inventory/job sources are snapshotted once at the
+    // beginning. Nothing continues checking after the queue completes.
+    // One-shot ownership work advances every framework update, but each slice is
+    // bounded by the OwnershipIndex time budget. There is no idle/session polling.
+    private const int PermanentUnlockChecksPerPoll = 2048;
+    private bool ownershipPollingActive;
+    private bool ownershipTransientSnapshotCaptured;
     private uint[] ownershipItemIds = Array.Empty<uint>();
     private uint[] ownershipJobIds = Array.Empty<uint>();
 
@@ -116,22 +167,35 @@ public sealed class Plugin : IDalamudPlugin
         if (ConfigurationMigrator.Migrate(config))
             SaveConfig();
 
+        networkRequests = new NetworkRequestTracker();
         supplemental = new SupplementalCsvIndex(DataManager, Log);
-        collectibleSources = new CollectibleSourceIndex(Log);
+        collectibleSources = new CollectibleSourceIndex(Log, networkRequests);
         garlandSources = new GarlandSourceIndex(
             PluginInterface.GetPluginConfigDirectory(),
-            Log);
+            Log,
+            networkRequests);
+        garlandDutyUnlocks = new GarlandDutyUnlockIndex(
+            PluginInterface.GetPluginConfigDirectory(),
+            Log,
+            networkRequests);
+        communityDutyUnlocks = new CommunityDutyUnlockIndex(
+            PluginInterface.GetPluginConfigDirectory(),
+            Log,
+            networkRequests);
         catalog = new TargetCatalog(DataManager, supplemental);
 
         collectibleSources.BindTargets(catalog.Targets);
-        _ = collectibleSources.RefreshAsync();
+        // Network enrichment is deliberately not refreshed at plugin startup.
+        // CQG's normal ownership scan is local-only; community HTTP is manual
+        // or target-scoped on demand.
 
         setCatalog = new SetCatalog(catalog);
         jobCatalog = new JobProgressionCatalog(DataManager, Log);
+        dutyCatalog = new DutyCatalog(DataManager, Log);
         questGuidance = new QuestGuidanceIndex(DataManager, Log);
         ownership = new OwnershipIndex(DataManager, GameInventory, PlayerStateService, config, SaveConfig, Log);
         npcLocations = new NpcLocationIndex(DataManager, Log);
-        dutyUnlocks = new DutyUnlockGuidanceIndex(DataManager, questGuidance, Log);
+        dutyUnlocks = new DutyUnlockGuidanceIndex(DataManager, questGuidance, communityDutyUnlocks, garlandDutyUnlocks, Log);
         resolver = new SourceResolver(
             DataManager,
             supplemental,
@@ -144,11 +208,6 @@ public sealed class Plugin : IDalamudPlugin
             npcLocations,
             GetQuestStateByRowId,
             FindContainingSet);
-
-        _ = garlandSources.RefreshAsync(
-            catalog.Targets
-                .Where(target => resolver.NeedsGarlandEnrichment(target))
-                .Select(target => target.ItemId));
 
         BuildQuestCache();
         RepairSelection();
@@ -168,7 +227,7 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Custom Quest Guide. Optionally pass an item name or item ID to search/select it.",
+            HelpMessage = "Open Custom Quest Guide. Optionally pass an item, job, or duty name (or item ID) to search/select a traditional target.",
         });
 
         PluginInterface.UiBuilder.Draw += Draw;
@@ -191,6 +250,8 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CommandName);
         collectibleSources.Dispose();
         garlandSources.Dispose();
+        garlandDutyUnlocks.Dispose();
+        communityDutyUnlocks.Dispose();
     }
 
     private void OnLogin()
@@ -198,35 +259,83 @@ public sealed class Plugin : IDalamudPlugin
         PrintStartupMessage();
     }
 
+    private IEnumerable<uint> BuildSelectedOwnershipItemIds()
+    {
+        var prioritized = new List<uint>();
+
+        var selectedSet = setCatalog.Get(config.SelectedSetId);
+        if (selectedSet is not null)
+            prioritized.AddRange(selectedSet.ItemIds);
+
+        if (config.SelectedItemId != 0)
+            prioritized.Add(config.SelectedItemId);
+
+        return prioritized
+            .Where(id => id != 0)
+            .Distinct();
+    }
+
+    private IEnumerable<uint> BuildPinnedOwnershipItemIds()
+    {
+        var prioritized = new List<uint>();
+
+        foreach (var pin in config.PinnedTargets)
+        {
+            if (pin.Kind.Equals("Item", StringComparison.OrdinalIgnoreCase) && pin.NumericId != 0)
+            {
+                prioritized.Add(pin.NumericId);
+                continue;
+            }
+
+            if (!pin.Kind.Equals("Set", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var set = setCatalog.Get(pin.StringId);
+            if (set is null)
+                continue;
+
+            prioritized.AddRange(set.ItemIds);
+        }
+
+        return prioritized
+            .Where(id => id != 0)
+            .Distinct();
+    }
+
     private void StartOwnershipPolling()
     {
-        var now = DateTime.UtcNow;
-        ownership.BeginPolling(ownershipItemIds);
-        ownershipPollingEndsUtc = now + OwnershipPollingDuration;
-        // Do not perform ownership work on the slash-command frame itself.
-        nextOwnershipPollUtc = now + TimeSpan.FromMilliseconds(100);
-        nextOwnershipTransientRefreshUtc = nextOwnershipPollUtc;
+        ownership.BeginPolling(
+            BuildSelectedOwnershipItemIds(),
+            BuildPinnedOwnershipItemIds(),
+            ownershipItemIds);
+        dutyUnlocks.BeginPolling();
+
+        ownershipPollingActive = true;
+        // Do not perform ownership work on the slash-command frame itself. The
+        // first framework update after the command captures transient sources and
+        // begins the bounded one-shot permanent scan.
+        ownershipTransientSnapshotCaptured = false;
     }
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if (!ClientState.IsLoggedIn)
+        if (!ClientState.IsLoggedIn || !ownershipPollingActive)
             return;
 
-        var now = DateTime.UtcNow;
-        if (now >= ownershipPollingEndsUtc || now < nextOwnershipPollUtc)
-            return;
-
-        // Schedule the next small chunk before doing the work so a slow sample can
-        // never cause several catch-up chunks on consecutive frames.
-        nextOwnershipPollUtc = now + OwnershipPollingInterval;
-        var refreshTransientSources = now >= nextOwnershipTransientRefreshUtc;
-        if (refreshTransientSources)
-            nextOwnershipTransientRefreshUtc = now + OwnershipTransientRefreshInterval;
+        var refreshTransientSources = !ownershipTransientSnapshotCaptured;
 
         try
         {
             ownership.PollSnapshotStep(ownershipJobIds, PermanentUnlockChecksPerPoll, refreshTransientSources);
+            if (refreshTransientSources)
+                ownershipTransientSnapshotCaptured = true;
+            dutyUnlocks.PollSnapshotStep(256);
+
+            if (ownership.PermanentPollingComplete && dutyUnlocks.PollingComplete)
+            {
+                ownership.FinishPolling();
+                ownershipPollingActive = false;
+            }
         }
         catch (Exception ex)
         {
@@ -244,12 +353,12 @@ public sealed class Plugin : IDalamudPlugin
         // Keep this deliberately plain: no SeString payloads, custom tag color,
         // or other chat styling. It should look like an ordinary informational
         // line and only appear once per plugin/game startup.
-        ChatGui.Print("[Custom Quest Guide] /cqg opens the guide and starts a 30-second ownership refresh in the background. /cqg <item name or item ID> also searches directly. See the Help tab for details.");
+        ChatGui.Print("[Custom Quest Guide] /cqg opens the guide and starts one one-shot ownership scan in the background. Each queued item/duty is checked once, then CQG stops checking until /cqg is run again. See Help for details.");
     }
 
     private void OnCommand(string command, string args)
     {
-        // The slash command starts a bounded background ownership refresh. The
+        // The slash command starts one complete background ownership refresh. The
         // expensive work is spread across later framework updates rather than
         // running synchronously on the command frame.
         StartOwnershipPolling();
@@ -271,15 +380,28 @@ public sealed class Plugin : IDalamudPlugin
         exact ??= catalog.Targets.FirstOrDefault(t =>
             t.Name.Equals(query, StringComparison.OrdinalIgnoreCase));
 
-        if (exact is null)
+        if (exact is not null)
+        {
+            SelectItemTarget(exact);
             return;
+        }
 
-        config.SelectedSetId = string.Empty;
-        config.SelectedCategory = exact.Category;
-        config.SelectedJob = "All";
-        config.SelectedItemId = exact.ItemId;
-        config.SelectedChainIndex = 0;
-        SaveConfig();
+        var exactJob = jobCatalog.Jobs.FirstOrDefault(x =>
+            x.Name.Equals(query, StringComparison.OrdinalIgnoreCase) ||
+            x.Abbreviation.Equals(query, StringComparison.OrdinalIgnoreCase));
+        if (exactJob is not null)
+        {
+            SelectJobTarget(exactJob);
+            return;
+        }
+
+        var exactDuty = dutyCatalog.GetByName(query);
+        if (exactDuty is not null)
+        {
+            SelectDutyTarget(exactDuty);
+            return;
+        }
+
     }
 
     private void OpenMainWindow() => windowOpen = true;
@@ -298,12 +420,19 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         DrawMainTabs();
+        if (activeTab == MainTab.Items)
+            DrawItemsNavigation();
+        else if (activeTab is MainTab.Jobs or MainTab.Duties)
+            DrawUnifiedTargetSelector();
         ImGui.Separator();
 
         switch (activeTab)
         {
             case MainTab.Jobs:
                 DrawJobsAndProgressionTab();
+                break;
+            case MainTab.Duties:
+                DrawDutiesTab();
                 break;
             case MainTab.Pins:
                 DrawPinnedTargetsTab();
@@ -329,6 +458,10 @@ public sealed class Plugin : IDalamudPlugin
             activeTab = MainTab.Jobs;
 
         ImGui.SameLine();
+        if (ImGui.Button(activeTab == MainTab.Duties ? "[ Duties ]" : "Duties"))
+            activeTab = MainTab.Duties;
+
+        ImGui.SameLine();
         if (ImGui.Button(activeTab == MainTab.Pins ? $"[ Pinned Targets ({config.PinnedTargets.Count}) ]" : $"Pinned Targets ({config.PinnedTargets.Count})"))
             activeTab = MainTab.Pins;
 
@@ -347,11 +480,11 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextUnformatted("Quick command");
         ImGui.Separator();
         ImGui.BulletText("/cqg opens Custom Quest Guide.");
-        ImGui.BulletText("/cqg <item name or item ID> opens the Items view and attempts to select that target directly.");
+        ImGui.BulletText("/cqg <target name or item ID> searches items, jobs, and duties; sets are chosen from the separate Set dropdown on the Items tab.");
 
         ImGui.Spacing();
         ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
-        ImGui.TextWrapped("IMPORTANT: CQG starts a 30-second ownership polling window when you use /cqg, then stops. The refresh runs incrementally in the background so the slash command itself does not perform one large ownership scan. Run /cqg again whenever you want ownership refreshed.");
+        ImGui.TextWrapped("IMPORTANT: CQG starts one complete one-shot ownership and duty-state scan when you use /cqg. The scan advances in small frame-budgeted slices until complete, then CQG performs no further ownership checks until /cqg is run again. Selecting a target during an active scan moves that target and related remaining checks to the front of the queue.");
         ImGui.PopStyleColor();
 
         ImGui.Spacing();
@@ -382,6 +515,18 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextWrapped("Why does CQG tell me to talk to an NPC instead of run the duty?");
         ImGui.BulletText("CQG checks whether supported duty content is unlocked. If it is locked, the next action is the unlock quest/NPC when that route can be resolved.");
         ImGui.BulletText("Once the duty is unlocked, guidance changes to running the duty itself.");
+        ImGui.BulletText("Unlocked duties are shown in green anywhere CQG exposes them as a dependency or direct target.");
+        ImGui.BulletText("Locked duties can be pinned directly from the Duties tab or from an item/source that depends on them.");
+
+        ImGui.Spacing();
+        ImGui.TextWrapped("How do I place a map flag from CQG?");
+        ImGui.BulletText("When CQG has an authoritative NPC placement or explicit map coordinates, the displayed location becomes clickable.");
+        ImGui.BulletText("Click the location name to open the in-game map and place a flag at that location.");
+
+        ImGui.Spacing();
+        ImGui.TextWrapped("How does the Target selector work?");
+        ImGui.BulletText("The Target control combines searching and selecting for items, jobs, and duties. Sets use the separate Set dropdown on the Items tab.");
+        ImGui.BulletText("With an empty search it acts as a browser for the current tab/category; typing searches across all supported target types.");
 
         ImGui.Spacing();
         ImGui.TextWrapped("Why is a completion-reward mount not the next set target?");
@@ -389,24 +534,24 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Spacing();
         ImGui.TextWrapped("Why does an owned item still look incomplete?");
-        ImGui.BulletText("CQG checks ownership only during the 30 seconds after you use /cqg. When the window closes, it keeps using the last captured snapshot until you run /cqg again.");
+        ImGui.BulletText("CQG checks ownership only during the one-shot background scan started by /cqg. Each queued check runs once; when the scan finishes, CQG keeps using that snapshot until /cqg is run again.");
         ImGui.BulletText("CQG can only use ownership sources exposed by the client or previously snapshotted while authoritative data was available.");
         ImGui.BulletText("For Glamour Dresser items, the persistent per-character dresser snapshot is still used. Opening the dresser updates that saved cache when authoritative dresser data is available.");
 
         ImGui.Spacing();
         ImGui.TextWrapped("What does Refresh acquisition sources do?");
         ImGui.BulletText("It refreshes external acquisition enrichment used when live game-sheet data is insufficient. Core game-data resolution and saved ownership snapshots remain local.");
-        ImGui.BulletText("Manual source refreshes have a short cooldown so repeated clicks cannot spam community services.");
+        ImGui.BulletText("Manual source refreshes have a 5-minute cooldown. They refresh the compact collectible indexes only; Garland item documents are requested one selected target at a time.");
         ImGui.BulletText("If an external service is unavailable, CQG keeps usable cached/session data where possible and degrades gracefully rather than wiping working guidance.");
 
         ImGui.Spacing();
         ImGui.TextWrapped("How do pins work?");
-        ImGui.BulletText("Items, sets, job unlocks, and job progression can be pinned from their respective views.");
+        ImGui.BulletText("Items, sets, duties, job unlocks, and job progression can be pinned from their respective views.");
         ImGui.BulletText("Pinned sets use the same smart frontier as the main set view, so their next action should follow the best currently actionable missing member.");
 
         ImGui.Spacing();
         ImGui.TextWrapped("Does CQG continuously monitor my character?");
-        ImGui.BulletText("No. Ownership polling exists only for the 30-second window started by /cqg. After that window CQG uses the last captured state until /cqg is run again.");
+        ImGui.BulletText("No. Ownership checking exists only while the one-shot scan started by /cqg is running. After the queue finishes, there are no ownership checks until /cqg is run again.");
         ImGui.BulletText("External acquisition-source refreshes are separate from ownership polling and are cached/rate-limited.");
 
         ImGui.Spacing();
@@ -416,7 +561,7 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.BulletText("Debug exports intentionally avoid account credentials, auth tokens, and machine-secret data.");
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Custom Quest Guide 1.0.0");
+        ImGui.TextDisabled("Custom Quest Guide 1.1.13");
     }
 
     private static void DrawHelpColorRow(Vector4 color, string label, string description)
@@ -428,9 +573,335 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextWrapped($"— {description}");
     }
 
+    private void DrawUnifiedTargetSelector()
+    {
+        var preview = GetUnifiedTargetPreview();
+        ImGui.SetNextItemWidth(620f);
+        if (!ImGui.BeginCombo("Target##UnifiedTarget", preview))
+            return;
+
+        ImGui.SetNextItemWidth(-1f);
+        ImGui.InputTextWithHint(
+            "##UnifiedTargetSearch",
+            "Search items, jobs, or duties...",
+            ref targetSearch,
+            128);
+        ImGui.Separator();
+
+        var query = targetSearch.Trim();
+        var shown = 0;
+
+        if (query.Length == 0)
+        {
+            DrawUnifiedCurrentContextTargets(ref shown);
+        }
+        else
+        {
+            foreach (var job in jobCatalog.Jobs
+                         .Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                     x.Abbreviation.Contains(query, StringComparison.OrdinalIgnoreCase))
+                         .OrderBy(x => SearchRank(x.Name, query))
+                         .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                         .Take(80))
+            {
+                var visualState = GetJobVisualState(job);
+                if (visualState != JobVisualState.Locked)
+                    ImGui.PushStyleColor(ImGuiCol.Text, visualState == JobVisualState.Complete ? OwnedGreen : PartialBlue);
+                if (ImGui.Selectable($"[Job] {job.Name} ({job.Abbreviation})##job-{job.ClassJobId}"))
+                {
+                    SelectJobTarget(job);
+                    ImGui.CloseCurrentPopup();
+                }
+                if (visualState != JobVisualState.Locked)
+                    ImGui.PopStyleColor();
+                shown++;
+            }
+
+            foreach (var duty in dutyCatalog.Duties
+                         .Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                     x.Category.Contains(query, StringComparison.OrdinalIgnoreCase))
+                         .OrderBy(x => SearchRank(x.Name, query))
+                         .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                         .Take(120))
+            {
+                var unlocked = dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
+                if (unlocked)
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                if (ImGui.Selectable($"[Duty] {duty.Name}##duty-{duty.ContentFinderConditionId}"))
+                {
+                    SelectDutyTarget(duty);
+                    ImGui.CloseCurrentPopup();
+                }
+                if (unlocked)
+                    ImGui.PopStyleColor();
+                shown++;
+            }
+
+            foreach (var target in GetGlobalSearchResults(query).Take(240))
+            {
+                var ownedStatus = ownership.GetItemStatus(target.ItemId);
+                var resolved = resolver.HasDirectSource(target);
+                if (ownedStatus.IsOwned)
+                    ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(ownedStatus) ? GlamourPink : OwnedGreen);
+                else if (!resolved)
+                    ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
+
+                if (ImGui.Selectable($"[Item] {target.Name}##item-{target.ItemId}"))
+                {
+                    SelectItemTarget(target);
+                    ImGui.CloseCurrentPopup();
+                }
+
+                if (ownedStatus.IsOwned || !resolved)
+                    ImGui.PopStyleColor();
+                shown++;
+            }
+        }
+
+        if (shown == 0)
+            ImGui.TextDisabled(query.Length == 0 ? "No targets are available in this view." : "No targets match that search.");
+
+        ImGui.EndCombo();
+    }
+
+    private void DrawUnifiedCurrentContextTargets(ref int shown)
+    {
+        switch (activeTab)
+        {
+            case MainTab.Items:
+            {
+                foreach (var target in catalog.GetTargets(config.SelectedCategory, config.SelectedJob).Take(300))
+                {
+                    var ownedStatus = ownership.GetItemStatus(target.ItemId);
+                    var resolved = resolver.HasDirectSource(target);
+                    if (ownedStatus.IsOwned)
+                        ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(ownedStatus) ? GlamourPink : OwnedGreen);
+                    else if (!resolved)
+                        ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
+                    if (ImGui.Selectable($"[Item] {target.Name}##item-current-{target.ItemId}"))
+                    {
+                        SelectItemTarget(target);
+                        ImGui.CloseCurrentPopup();
+                    }
+                    if (ownedStatus.IsOwned || !resolved)
+                        ImGui.PopStyleColor();
+                    shown++;
+                }
+                break;
+            }
+            case MainTab.Jobs:
+                foreach (var job in jobCatalog.GetByCategory(config.SelectedProgressionCategory))
+                {
+                    var state = GetJobVisualState(job);
+                    if (state != JobVisualState.Locked)
+                        ImGui.PushStyleColor(ImGuiCol.Text, state == JobVisualState.Complete ? OwnedGreen : PartialBlue);
+                    if (ImGui.Selectable($"[Job] {job.Name} ({job.Abbreviation})##job-current-{job.ClassJobId}"))
+                    {
+                        SelectJobTarget(job);
+                        ImGui.CloseCurrentPopup();
+                    }
+                    if (state != JobVisualState.Locked)
+                        ImGui.PopStyleColor();
+                    shown++;
+                }
+                break;
+            case MainTab.Duties:
+                foreach (var duty in dutyCatalog.GetByCategory(config.SelectedDutyCategory).Take(300))
+                {
+                    var unlocked = dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
+                    if (unlocked)
+                        ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                    if (ImGui.Selectable($"[Duty] {duty.Name}##duty-current-{duty.ContentFinderConditionId}"))
+                    {
+                        SelectDutyTarget(duty);
+                        ImGui.CloseCurrentPopup();
+                    }
+                    if (unlocked)
+                        ImGui.PopStyleColor();
+                    shown++;
+                }
+                break;
+        }
+    }
+
+    private string GetUnifiedTargetPreview()
+    {
+        if (activeTab == MainTab.Duties && dutyCatalog.Get(config.SelectedDutyId) is { } duty)
+            return $"[Duty] {duty.Name}";
+        if (activeTab == MainTab.Jobs && jobCatalog.Get(config.SelectedClassJobId) is { } job)
+            return $"[Job] {job.Name} ({job.Abbreviation})";
+        if (activeTab == MainTab.Items && catalog.GetById(config.SelectedItemId) is { } item)
+            return $"[Item] {item.Name}";
+        return "Search or select a target...";
+    }
+
+    private void DrawSetSelector()
+    {
+        var selected = setCatalog.Get(config.SelectedSetId);
+        var preview = selected is null ? "No set selected" : selected.Name;
+
+        ImGui.SetNextItemWidth(620f);
+        if (!ImGui.BeginCombo("Set##SeparateSetTarget", preview))
+            return;
+
+        if (ImGui.Selectable("No set / single target", selected is null))
+        {
+            config.SelectedSetId = string.Empty;
+            config.SelectedRelicJob = string.Empty;
+            SaveConfig();
+            ImGui.CloseCurrentPopup();
+        }
+
+        string? currentGroup = null;
+        foreach (var set in setCatalog.Sets
+                     .OrderBy(x => x.Group, StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!string.Equals(currentGroup, set.Group, StringComparison.OrdinalIgnoreCase))
+            {
+                currentGroup = set.Group;
+                ImGui.Separator();
+                ImGui.TextUnformatted(currentGroup);
+                ImGui.Separator();
+            }
+
+            if (ImGui.Selectable($"{set.Name}##set-separate-{set.Id}", selected?.Id == set.Id))
+            {
+                SelectSetTarget(set);
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        ImGui.EndCombo();
+    }
+
+    private static int SearchRank(string value, string query)
+    {
+        if (value.Equals(query, StringComparison.OrdinalIgnoreCase))
+            return 0;
+        if (value.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+            return 1;
+        return 2;
+    }
+
+    private void PromoteActiveScanTargets(
+        IEnumerable<uint>? itemIds,
+        IEnumerable<string>? dutyNames,
+        string reason)
+    {
+        if (!ownershipPollingActive)
+            return;
+
+        if (itemIds is not null)
+            ownership.PromoteCandidates(itemIds, reason);
+        if (dutyNames is not null)
+            dutyUnlocks.PromoteDuties(dutyNames);
+    }
+
+    private IEnumerable<string> GetRelatedDutyNames(TargetEntry target)
+    {
+        AcquisitionResult result;
+        try
+        {
+            result = resolver.Resolve(target);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var source in result.Sources)
+        {
+            var dutyName = DutyUnlockGuidanceIndex.ExtractDutyName(source);
+            if (!string.IsNullOrWhiteSpace(dutyName) &&
+                dutyUnlocks.GetContentFinderConditionId(dutyName) != 0)
+                yield return dutyName;
+        }
+    }
+
+    private void RequestTargetScopedSourceEnrichment(TargetEntry target)
+    {
+        // Only a user-selected target may trigger Garland item enrichment.
+        // Never bulk-query Garland from /cqg, startup, drawing, or background
+        // ownership scanning. Positive results and misses are cached by the
+        // index, so repeatedly selecting the same target does not spam HTTP.
+        if (resolver.NeedsGarlandEnrichment(target))
+            garlandSources.EnsureRequested(target.ItemId);
+
+        // Exchange chains are part of the selected target's answer. If a cost
+        // item/token has no actionable local/cached source, queue only that
+        // dependency for the same paced, cached target-scoped enrichment.
+        // This is bounded so a pathological shop row cannot fan out requests.
+        foreach (var dependency in resolver.GetExchangeDependencies(target.ItemId).Take(4))
+        {
+            if (dependency.CostItemName.Equals("Gil", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!resolver.HasKnownActionableSourceForItemId(dependency.CostItemId) &&
+                !garlandSources.IsChecked(dependency.CostItemId))
+            {
+                garlandSources.EnsureRequested(dependency.CostItemId);
+            }
+        }
+    }
+
+    private void SelectItemTarget(TargetEntry target)
+    {
+        config.SelectedSetId = string.Empty;
+        config.SelectedCategory = target.Category;
+        config.SelectedJob = "All";
+        config.SelectedItemId = target.ItemId;
+        config.SelectedChainIndex = 0;
+        activeTab = MainTab.Items;
+        SaveConfig();
+        RequestTargetScopedSourceEnrichment(target);
+        PromoteActiveScanTargets(
+            new[] { target.ItemId },
+            GetRelatedDutyNames(target),
+            $"selected item: {target.Name}");
+    }
+
+    private void SelectSetTarget(TargetSet set)
+    {
+        config.SelectedSetId = set.Id;
+        config.SelectedRelicJob = string.Empty;
+        activeTab = MainTab.Items;
+        SaveConfig();
+
+        var members = set.ItemIds
+            .Select(catalog.GetById)
+            .Where(x => x is not null)
+            .Cast<TargetEntry>()
+            .ToArray();
+        PromoteActiveScanTargets(
+            set.ItemIds,
+            members.SelectMany(GetRelatedDutyNames).Distinct(StringComparer.OrdinalIgnoreCase),
+            $"selected set: {set.Name}");
+    }
+
+    private void SelectJobTarget(JobProgressionTarget job)
+    {
+        config.SelectedProgressionCategory = job.Category;
+        config.SelectedClassJobId = job.ClassJobId;
+        activeTab = MainTab.Jobs;
+        SaveConfig();
+    }
+
+    private void SelectDutyTarget(DutyTarget duty)
+    {
+        config.SelectedDutyCategory = duty.Category;
+        config.SelectedDutyId = duty.ContentFinderConditionId;
+        activeTab = MainTab.Duties;
+        SaveConfig();
+        PromoteActiveScanTargets(
+            null,
+            new[] { duty.Name },
+            $"selected duty: {duty.Name}");
+    }
+
     private void DrawItemsTab()
     {
-        DrawTargetPicker();
+        DrawCommonTargetControls();
 
         var selectedSet = setCatalog.Get(config.SelectedSetId);
 
@@ -595,15 +1066,15 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!string.IsNullOrWhiteSpace(job.UnlockQuest.QuestGiver))
             {
-                var location = string.IsNullOrWhiteSpace(job.UnlockQuest.Location)
-                    ? string.Empty
-                    : $" — {job.UnlockQuest.Location}";
                 var prefix = unlockComplete
                     ? "Unlocked via"
                     : unlockState == QuestProgressState.InProgress
                         ? "Quest started by"
                         : "Go to";
-                ImGui.TextDisabled($"{prefix}: {job.UnlockQuest.QuestGiver}{location}");
+                if (!string.IsNullOrWhiteSpace(job.UnlockQuest.Location))
+                    DrawNpcLocationLine(prefix, job.UnlockQuest.QuestGiver!, job.UnlockQuest.Location, $"job-unlock-{job.ClassJobId}");
+                else
+                    ImGui.TextDisabled($"{prefix}: {job.UnlockQuest.QuestGiver}");
             }
 
             if (job.UnlockPrerequisites.Count > 0)
@@ -633,10 +1104,11 @@ public sealed class Plugin : IDalamudPlugin
             ImGui.TextWrapped($"{(active ? "Current quest" : "Next quest")}: {nextLevel}{nextStep.Name}");
             if (!string.IsNullOrWhiteSpace(nextStep.QuestGiver))
             {
-                var location = string.IsNullOrWhiteSpace(nextStep.Location)
-                    ? string.Empty
-                    : $" — {nextStep.Location}";
-                ImGui.TextDisabled($"{(active ? "Quest started by" : "Go to")}: {nextStep.QuestGiver}{location}");
+                var prefix = active ? "Quest started by" : "Go to";
+                if (!string.IsNullOrWhiteSpace(nextStep.Location))
+                    DrawNpcLocationLine(prefix, nextStep.QuestGiver!, nextStep.Location, $"job-next-{job.ClassJobId}-{nextStep.QuestId}");
+                else
+                    ImGui.TextDisabled($"{prefix}: {nextStep.QuestGiver}");
             }
         }
         else if (job.Progression.Count > 0)
@@ -663,10 +1135,11 @@ public sealed class Plugin : IDalamudPlugin
                 nextStep?.QuestId == step.QuestId)
             {
                 ImGui.Indent();
-                var location = string.IsNullOrWhiteSpace(step.Location)
-                    ? string.Empty
-                    : $" — {step.Location}";
-                ImGui.TextDisabled($"{(state == QuestProgressState.InProgress ? "Quest started by" : "Go to")}: {step.QuestGiver}{location}");
+                var prefix = state == QuestProgressState.InProgress ? "Quest started by" : "Go to";
+                if (!string.IsNullOrWhiteSpace(step.Location))
+                    DrawNpcLocationLine(prefix, step.QuestGiver!, step.Location, $"job-step-{job.ClassJobId}-{step.QuestId}");
+                else
+                    ImGui.TextDisabled($"{prefix}: {step.QuestGiver}");
                 ImGui.Unindent();
             }
         }
@@ -683,16 +1156,106 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private void DrawDutiesTab()
+    {
+        ImGui.TextWrapped("Select and pin instanced duties directly. Unlocked duties use CQG's green completed/unlocked state; locked duties show the best known unlock quest and contact route.");
+        ImGui.Spacing();
+
+        var categories = dutyCatalog.Categories;
+        if (categories.Count == 0)
+        {
+            ImGui.TextDisabled("No duty data could be built from the current Content Finder sheets.");
+            return;
+        }
+
+        var categoryIndex = IndexOf(categories, config.SelectedDutyCategory);
+        if (categoryIndex < 0)
+            categoryIndex = 0;
+        var categoryNames = categories.ToArray();
+        if (ImGui.Combo("Category##DutyCategory", ref categoryIndex, categoryNames, categoryNames.Length))
+        {
+            config.SelectedDutyCategory = categoryNames[categoryIndex];
+            config.SelectedDutyId = dutyCatalog.GetByCategory(config.SelectedDutyCategory).FirstOrDefault()?.ContentFinderConditionId ?? 0;
+            SaveConfig();
+        }
+
+        var duties = dutyCatalog.GetByCategory(config.SelectedDutyCategory);
+        var duty = dutyCatalog.Get(config.SelectedDutyId);
+        if (duty is null || !duty.Category.Equals(config.SelectedDutyCategory, StringComparison.OrdinalIgnoreCase))
+        {
+            duty = duties.FirstOrDefault();
+            if (duty is not null && config.SelectedDutyId != duty.ContentFinderConditionId)
+            {
+                config.SelectedDutyId = duty.ContentFinderConditionId;
+                SaveConfig();
+            }
+        }
+
+        ImGui.TextDisabled("Use the Target control above to search or choose a duty in this category.");
+        if (duty is null)
+            return;
+
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        var advice = dutyUnlocks.GetAdvice(duty.Name);
+        var unlocked = advice?.IsUnlocked ?? dutyUnlocks.IsDutyUnlocked(duty.Name);
+        if (unlocked == true)
+            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+        ImGui.TextUnformatted(duty.Name.ToUpperInvariant());
+        if (unlocked == true)
+            ImGui.PopStyleColor();
+
+        ImGui.SameLine();
+        DrawPinToggle("Duty", duty.ContentFinderConditionId, string.Empty, "Pin Duty", "Unpin Duty");
+
+        ImGui.TextDisabled(duty.Category + (duty.RequiredLevel > 0 ? $" — Lv. {duty.RequiredLevel}" : string.Empty));
+        ImGui.Spacing();
+
+        if (unlocked == true)
+        {
+            DrawColoredText("Unlocked", true);
+            ImGui.TextWrapped("This duty is available on the current character.");
+            return;
+        }
+
+        ImGui.TextUnformatted("Locked");
+        if (advice is null)
+        {
+            ImGui.TextDisabled("CQG can identify this duty but could not resolve its unlock quest from the current game data.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(advice.QuestName))
+        {
+            ImGui.TextUnformatted("Unlock quest:");
+            ImGui.SameLine();
+            ImGui.TextUnformatted(advice.QuestName);
+        }
+        else
+        {
+            ImGui.TextDisabled("Unlock quest was not resolved.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(advice.Contact))
+            DrawNpcLocationLine("Go to", advice.Contact!, advice.Location, $"duty-{duty.ContentFinderConditionId}");
+        else if (!string.IsNullOrWhiteSpace(advice.Location))
+            DrawLocationOnlyLine("Location", advice.Location!, $"duty-{duty.ContentFinderConditionId}");
+
+        if (!string.IsNullOrWhiteSpace(advice.Note))
+            ImGui.TextDisabled(advice.Note);
+    }
+
     private void DrawPinnedTargetsTab()
     {
         ImGui.TextWrapped(
-            "Unified priority queue for item, set, job-unlock, and formal job-progression targets. " +
+            "Unified priority queue for item, set, duty, job-unlock, and formal job-progression targets. " +
             "Priority is the list order.");
         ImGui.Spacing();
 
         if (config.PinnedTargets.Count == 0)
         {
-            ImGui.TextDisabled("No targets are pinned yet. Pin items, sets, or class/job progression from their tabs.");
+            ImGui.TextDisabled("No targets are pinned yet. Pin items, sets, duties, or class/job progression from their tabs.");
             return;
         }
 
@@ -724,6 +1287,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 ImGui.Indent();
                 ImGui.TextWrapped(subtitle);
+                DrawPinnedLocationLink(pin, i);
                 ImGui.Unindent();
             }
 
@@ -771,6 +1335,77 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+
+    private void DrawPinnedLocationLink(PinnedTargetConfig pin, int index)
+    {
+        switch (pin.Kind)
+        {
+            case "Item":
+            {
+                var item = catalog.GetById(pin.NumericId);
+                if (item is null || ownership.GetItemStatus(item.ItemId).IsOwned)
+                    return;
+                var action = actionGuidance.Resolve(resolver.Resolve(item));
+                if (!string.IsNullOrWhiteSpace(action.GoTo))
+                    DrawCombinedWhoWhereLine("Map", action.GoTo, $"pin-item-{index}");
+                else if (!string.IsNullOrWhiteSpace(action.QuestStartedBy))
+                    DrawCombinedWhoWhereLine("Map", action.QuestStartedBy, $"pin-item-start-{index}");
+                break;
+            }
+            case "Duty":
+            {
+                var duty = dutyCatalog.Get(pin.NumericId);
+                if (duty is null || dutyUnlocks.IsDutyUnlocked(duty.Name) == true)
+                    return;
+                var advice = dutyUnlocks.GetAdvice(duty.Name);
+                if (!string.IsNullOrWhiteSpace(advice?.Contact))
+                    DrawNpcLocationLine("Map", advice!.Contact!, advice.Location, $"pin-duty-{index}");
+                else if (!string.IsNullOrWhiteSpace(advice?.Location))
+                    DrawLocationOnlyLine("Map", advice!.Location!, $"pin-duty-{index}");
+                break;
+            }
+            case "JobUnlock":
+            {
+                var job = jobCatalog.Get(pin.NumericId);
+                if (job?.UnlockQuest is null || ownership.IsJobUnlocked(job.ClassJobId))
+                    return;
+                if (!string.IsNullOrWhiteSpace(job.UnlockQuest.QuestGiver) && !string.IsNullOrWhiteSpace(job.UnlockQuest.Location))
+                    DrawNpcLocationLine("Map", job.UnlockQuest.QuestGiver!, job.UnlockQuest.Location, $"pin-job-unlock-{index}");
+                break;
+            }
+            case "JobProgression":
+            {
+                var job = jobCatalog.Get(pin.NumericId);
+                if (job is null)
+                    return;
+                var sequence = ResolveJobQuestSequence(job.Progression);
+                var actionable = sequence.CurrentOrNext;
+                if (!string.IsNullOrWhiteSpace(actionable?.Info?.QuestGiver) && !string.IsNullOrWhiteSpace(actionable?.Info?.Location))
+                    DrawNpcLocationLine("Map", actionable!.Info!.QuestGiver!, actionable.Info.Location, $"pin-job-progress-{index}");
+                break;
+            }
+            case "Set":
+            {
+                var set = setCatalog.Get(pin.StringId);
+                if (set is null)
+                    return;
+                var members = set.ItemIds
+                    .Select(catalog.GetById)
+                    .Where(x => x is not null)
+                    .Cast<TargetEntry>()
+                    .Where(x => string.IsNullOrWhiteSpace(pin.Variant) || x.EquipJobs.Contains(pin.Variant))
+                    .ToArray();
+                var frontier = GetSetFrontierChoice(set, members);
+                if (frontier is null)
+                    return;
+                if (!string.IsNullOrWhiteSpace(frontier.Action.GoTo))
+                    DrawCombinedWhoWhereLine("Map", frontier.Action.GoTo, $"pin-set-{index}");
+                else if (!string.IsNullOrWhiteSpace(frontier.DutyAdvice?.Contact))
+                    DrawNpcLocationLine("Map", frontier.DutyAdvice!.Contact!, frontier.DutyAdvice.Location, $"pin-set-duty-{index}");
+                break;
+            }
+        }
+    }
 
     private static void DrawColoredText(string text, bool green)
     {
@@ -855,6 +1490,11 @@ public sealed class Plugin : IDalamudPlugin
             }
             case "JobUnlock":
                 return ownership.IsJobUnlocked(pin.NumericId);
+            case "Duty":
+            {
+                var duty = dutyCatalog.Get(pin.NumericId);
+                return duty is not null && dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
+            }
             case "JobProgression":
             {
                 var job = jobCatalog.Get(pin.NumericId);
@@ -875,6 +1515,97 @@ public sealed class Plugin : IDalamudPlugin
 
     private TargetSet? FindContainingSet(uint itemId) =>
         setCatalog.Sets.FirstOrDefault(set => set.ItemIds.Contains(itemId));
+
+    private DutyTarget? GetDutyFromSource(SourceEntry source)
+    {
+        var dutyName = DutyUnlockGuidanceIndex.ExtractDutyName(source);
+        if (string.IsNullOrWhiteSpace(dutyName))
+            return null;
+
+        var duty = dutyCatalog.GetByName(dutyName);
+        if (duty is not null)
+            return duty;
+
+        var cfcId = dutyUnlocks.GetContentFinderConditionId(dutyName);
+        return cfcId == 0 ? null : dutyCatalog.Get(cfcId);
+    }
+
+    private void DrawDutyDependency(AcquisitionResult result, string idPrefix)
+    {
+        SourceEntry? source = null;
+        string? dutyName = null;
+        DutyTarget? duty = null;
+        uint dutyPinId = 0;
+
+        // Only promote a source into the duty dependency block when it can be
+        // tied to an actual ContentFinderCondition row. This catches exact
+        // Activity sources such as "Containment Bay P1T6 (Extreme)" while
+        // avoiding broad labels such as "Duty Chest".
+        foreach (var candidate in result.Sources)
+        {
+            var candidateName = DutyUnlockGuidanceIndex.ExtractDutyName(candidate);
+            if (string.IsNullOrWhiteSpace(candidateName))
+                continue;
+
+            var candidateDuty = dutyCatalog.GetByName(candidateName);
+            var candidateId = candidateDuty?.ContentFinderConditionId ??
+                              dutyUnlocks.GetContentFinderConditionId(candidateName);
+            if (candidateId == 0)
+                continue;
+
+            source = candidate;
+            dutyName = candidateDuty?.Name ?? candidateName;
+            duty = candidateDuty ?? dutyCatalog.Get(candidateId);
+            dutyPinId = candidateId;
+            break;
+        }
+
+        if (source is null || string.IsNullOrWhiteSpace(dutyName) || dutyPinId == 0)
+            return;
+
+        var advice = dutyUnlocks.GetAdvice(dutyName);
+        var unlocked = advice?.IsUnlocked ?? dutyUnlocks.IsDutyUnlocked(dutyName);
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Duty:");
+        ImGui.SameLine();
+        if (unlocked == true)
+            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+        ImGui.TextUnformatted(dutyName);
+        if (unlocked == true)
+            ImGui.PopStyleColor();
+
+        ImGui.SameLine();
+        DrawPinToggle("Duty", dutyPinId, string.Empty, "Pin Duty", "Unpin Duty");
+
+        if (string.Equals(source.SpecificityHint, "Exchange dependency", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(source.Detail))
+        {
+            ImGui.TextDisabled(source.Detail);
+        }
+
+        if (unlocked == true)
+        {
+            DrawColoredText("Duty unlocked", true);
+            return;
+        }
+
+        if (advice is null)
+        {
+            ImGui.TextDisabled("Duty is locked; CQG could not resolve its unlock quest.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(advice.QuestName))
+            ImGui.TextWrapped($"Unlock quest: {advice.QuestName}");
+        else
+            ImGui.TextDisabled("Unlock quest was not resolved.");
+
+        if (!string.IsNullOrWhiteSpace(advice.Contact))
+            DrawNpcLocationLine("Go to", advice.Contact!, advice.Location, $"{idPrefix}-{duty?.ContentFinderConditionId ?? 0}");
+        else if (!string.IsNullOrWhiteSpace(advice.Location))
+            DrawLocationOnlyLine("Location", advice.Location!, $"{idPrefix}-{duty?.ContentFinderConditionId ?? 0}");
+    }
 
     private DutyUnlockAdvice? GetDutyUnlockAdvice(TargetSet set, TargetEntry member)
     {
@@ -991,19 +1722,35 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!frontier.Action.IsEmpty)
         {
+            var actionIsUnlockedDuty = frontier.Action.ActionLabel.Equals("Run", StringComparison.OrdinalIgnoreCase);
+            if (actionIsUnlockedDuty)
+                ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
             ImGui.TextUnformatted($"{frontier.Action.ActionLabel}: {frontier.Action.ActionText}");
+            if (actionIsUnlockedDuty)
+                ImGui.PopStyleColor();
+
+            var actionDuty = dutyCatalog.GetByName(frontier.Action.ActionText);
+            if (actionDuty is not null)
+            {
+                ImGui.SameLine();
+                DrawPinToggle("Duty", actionDuty.ContentFinderConditionId, string.Empty, "Pin Duty", "Unpin Duty");
+            }
+
             if (!string.IsNullOrWhiteSpace(frontier.Action.GoTo))
-                ImGui.TextWrapped($"Go to: {frontier.Action.GoTo}");
+                DrawCombinedWhoWhereLine("Go to", frontier.Action.GoTo, $"set-frontier-{frontier.Member.ItemId}");
             else if (!string.IsNullOrWhiteSpace(frontier.Action.QuestStartedBy))
-                ImGui.TextDisabled($"Quest started by: {frontier.Action.QuestStartedBy}");
+                DrawCombinedWhoWhereLine("Quest started by", frontier.Action.QuestStartedBy, $"set-frontier-start-{frontier.Member.ItemId}");
             return;
         }
 
         if (frontier.DutyAdvice is { } advice)
         {
+            var duty = dutyCatalog.GetByName(advice.DutyName);
             if (advice.IsUnlocked == true)
             {
+                ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
                 ImGui.TextUnformatted($"Run: {advice.DutyName}");
+                ImGui.PopStyleColor();
             }
             else
             {
@@ -1011,12 +1758,17 @@ public sealed class Plugin : IDalamudPlugin
                 if (!string.IsNullOrWhiteSpace(advice.QuestName))
                     ImGui.TextUnformatted($"Unlock via: {advice.QuestName}");
                 if (!string.IsNullOrWhiteSpace(advice.Contact))
-                {
-                    var where = string.IsNullOrWhiteSpace(advice.Location) ? string.Empty : $" — {advice.Location}";
-                    ImGui.TextWrapped($"Talk to: {advice.Contact}{where}");
-                }
+                    DrawNpcLocationLine("Talk to", advice.Contact!, advice.Location, $"set-duty-{frontier.Member.ItemId}");
+                else if (!string.IsNullOrWhiteSpace(advice.Location))
+                    DrawLocationOnlyLine("Location", advice.Location!, $"set-duty-{frontier.Member.ItemId}");
                 if (!string.IsNullOrWhiteSpace(advice.Note))
                     ImGui.TextDisabled(advice.Note);
+            }
+
+            if (duty is not null)
+            {
+                ImGui.SameLine();
+                DrawPinToggle("Duty", duty.ContentFinderConditionId, string.Empty, "Pin Duty", "Unpin Duty");
             }
             return;
         }
@@ -1050,6 +1802,9 @@ public sealed class Plugin : IDalamudPlugin
             "JobProgression" => jobCatalog.Get(pin.NumericId) is { } progressionJob
                 ? $"[JOB] {progressionJob.Name} Progression"
                 : $"[JOB] Missing ClassJob #{pin.NumericId}",
+            "Duty" => dutyCatalog.Get(pin.NumericId) is { } duty
+                ? $"[DUTY] {duty.Name}"
+                : $"[DUTY] Missing ContentFinderCondition #{pin.NumericId}",
             _ => $"[UNKNOWN] {pin.Kind}",
         };
     }
@@ -1165,6 +1920,22 @@ public sealed class Plugin : IDalamudPlugin
                 var resolved = members.Count(resolver.HasDirectSource);
                 return $"{ownedCount} / {members.Length} owned; {resolved} / {members.Length} have resolved acquisition sources.";
             }
+            case "Duty":
+            {
+                var duty = dutyCatalog.Get(pin.NumericId);
+                if (duty is null)
+                    return "Duty is no longer present in the current game data.";
+                var advice = dutyUnlocks.GetAdvice(duty.Name);
+                if (advice?.IsUnlocked == true || dutyUnlocks.IsDutyUnlocked(duty.Name) == true)
+                    return "Unlocked — duty is available on this character.";
+                if (advice is null)
+                    return "Locked — unlock quest could not be resolved.";
+                var quest = string.IsNullOrWhiteSpace(advice.QuestName) ? "unlock quest unresolved" : advice.QuestName;
+                var who = string.IsNullOrWhiteSpace(advice.Contact)
+                    ? string.Empty
+                    : $" — Go to {advice.Contact}{(string.IsNullOrWhiteSpace(advice.Location) ? string.Empty : $" — {advice.Location}")}";
+                return $"Locked — {quest}{who}";
+            }
             case "JobUnlock":
             {
                 var job = jobCatalog.Get(pin.NumericId);
@@ -1220,6 +1991,7 @@ public sealed class Plugin : IDalamudPlugin
                 targetSearch = string.Empty;
                 activeTab = MainTab.Items;
                 SaveConfig();
+                RequestTargetScopedSourceEnrichment(item);
                 break;
             }
             case "Set":
@@ -1230,6 +2002,17 @@ public sealed class Plugin : IDalamudPlugin
                 if (!string.IsNullOrWhiteSpace(pin.Variant))
                     config.SelectedRelicJob = pin.Variant;
                 activeTab = MainTab.Items;
+                SaveConfig();
+                break;
+            }
+            case "Duty":
+            {
+                var duty = dutyCatalog.Get(pin.NumericId);
+                if (duty is null)
+                    return;
+                config.SelectedDutyCategory = duty.Category;
+                config.SelectedDutyId = duty.ContentFinderConditionId;
+                activeTab = MainTab.Duties;
                 SaveConfig();
                 break;
             }
@@ -1261,12 +2044,13 @@ public sealed class Plugin : IDalamudPlugin
         string stringId,
         string pinLabel = "Pin Target",
         string unpinLabel = "Unpin",
-        string variant = "")
+        string variant = "",
+        Vector2? buttonSize = null)
     {
         var index = FindPinIndex(kind, numericId, stringId, variant);
         var pinned = index >= 0;
 
-        if (!ImGui.Button(pinned ? unpinLabel : pinLabel))
+        if (!ImGui.Button(pinned ? unpinLabel : pinLabel, buttonSize ?? Vector2.Zero))
             return;
 
         if (pinned)
@@ -1314,79 +2098,43 @@ public sealed class Plugin : IDalamudPlugin
                 ?.ClassJobId ?? 0;
     }
 
-    private void DrawTargetPicker()
+    private void DrawItemsNavigation()
     {
-        // ---------- Optional broad Set Target ----------
-        var sets = setCatalog.Sets;
-        var setLabels = new List<string> { "(Single item)" };
-        setLabels.AddRange(sets.Select(s => $"{s.Group} — {s.Name}"));
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Set Target");
+        ImGui.Separator();
+        DrawSetSelector();
 
-        var selectedSetIndex = 0;
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Browse Filters");
+        ImGui.Separator();
+        DrawItemFilterControls();
 
-        if (!string.IsNullOrWhiteSpace(config.SelectedSetId))
-        {
-            var setIndex = sets
-                .Select((set, index) => (set, index))
-                .FirstOrDefault(x =>
-                    string.Equals(
-                        x.set.Id,
-                        config.SelectedSetId,
-                        StringComparison.OrdinalIgnoreCase))
-                .index;
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Target");
+        ImGui.Separator();
+        DrawUnifiedTargetSelector();
+    }
 
-            if (sets.Count > 0 &&
-                sets.Any(s => string.Equals(
-                    s.Id,
-                    config.SelectedSetId,
-                    StringComparison.OrdinalIgnoreCase)))
-            {
-                selectedSetIndex = setIndex + 1;
-            }
-        }
-
-        var setLabelArray = setLabels.ToArray();
-
-        if (ImGui.Combo(
-                "Set Target",
-                ref selectedSetIndex,
-                setLabelArray,
-                setLabelArray.Length))
-        {
-            config.SelectedSetId = selectedSetIndex == 0
-                ? string.Empty
-                : sets[selectedSetIndex - 1].Id;
-            config.SelectedRelicJob = string.Empty;
-
-            SaveConfig();
-        }
-
-        // A selected Set Target replaces the normal Category/Target selectors.
-        if (!string.IsNullOrWhiteSpace(config.SelectedSetId))
-        {
-            DrawCommonTargetControls();
-            return;
-        }
-
-        // ---------- Category ----------
+    private void DrawItemFilterControls()
+    {
         var categories = catalog.Categories;
         var categoryIndex = IndexOf(categories, config.SelectedCategory);
         if (categoryIndex < 0)
             categoryIndex = 0;
 
         var categoryNames = categories.ToArray();
-
-        if (ImGui.Combo("Category", ref categoryIndex, categoryNames, categoryNames.Length))
+        if (ImGui.Combo("Category##ItemBrowseCategory", ref categoryIndex, categoryNames, categoryNames.Length))
         {
+            config.SelectedSetId = string.Empty;
             config.SelectedCategory = categoryNames[categoryIndex];
             config.SelectedJob = "All";
             config.SelectedItemId = 0;
             config.SelectedChainIndex = 0;
-            targetSearch = string.Empty;
             SelectFirstTarget();
             SaveConfig();
         }
 
-        // ---------- Gear-only class/job filter ----------
         if (TargetCatalog.IsGearCategory(config.SelectedCategory))
         {
             var jobs = catalog.Jobs;
@@ -1395,9 +2143,9 @@ public sealed class Plugin : IDalamudPlugin
                 jobIndex = 0;
 
             var jobNames = jobs.ToArray();
-
-            if (ImGui.Combo("Class / Job", ref jobIndex, jobNames, jobNames.Length))
+            if (ImGui.Combo("Class / Job##ItemBrowseJob", ref jobIndex, jobNames, jobNames.Length))
             {
+                config.SelectedSetId = string.Empty;
                 config.SelectedJob = jobNames[jobIndex];
                 config.SelectedItemId = 0;
                 config.SelectedChainIndex = 0;
@@ -1405,96 +2153,10 @@ public sealed class Plugin : IDalamudPlugin
                 SaveConfig();
             }
         }
-
-        // ---------- Search + Target ----------
-        ImGui.SetNextItemWidth(260f);
-        ImGui.InputTextWithHint(
-            "##TargetSearch",
-            "Search all targets...",
-            ref targetSearch,
-            128);
-
-        ImGui.SameLine();
-
-        var allTargets = catalog.GetTargets(
-            config.SelectedCategory,
-            config.SelectedJob);
-
-        // Once the user types, search the entire target catalog rather than
-        // requiring them to already know which CQG category an item belongs to.
-        // Exact and prefix matches float to the top; cap very broad searches so
-        // one-character input cannot create an enormous ImGui combo.
-        IReadOnlyList<TargetEntry> visibleTargets;
-
-        if (string.IsNullOrWhiteSpace(targetSearch))
-        {
-            visibleTargets = allTargets;
-        }
         else
         {
-            visibleTargets = GetGlobalSearchResults(targetSearch.Trim());
+            ImGui.TextDisabled("Class / Job filter applies to gear categories.");
         }
-
-        if (!string.IsNullOrWhiteSpace(targetSearch) && visibleTargets.Count == 0)
-            ImGui.TextDisabled("No targets match that search.");
-        else if (!string.IsNullOrWhiteSpace(targetSearch) && visibleTargets.Count >= 500)
-            ImGui.TextDisabled("Showing the first 500 matches. Refine the search for a narrower result list.");
-
-        var selectedTarget =
-            catalog.GetById(config.SelectedItemId)?.Name ??
-            "Select a target...";
-
-        ImGui.SetNextItemWidth(440f);
-
-        if (ImGui.BeginCombo("Target", selectedTarget))
-        {
-            if (visibleTargets.Count == 0)
-            {
-                ImGui.TextDisabled("No targets match the current filters.");
-            }
-            else
-            {
-                foreach (var target in visibleTargets)
-                {
-                    var selected = target.ItemId == config.SelectedItemId;
-                    var resolved = resolver.HasDirectSource(target);
-                    var ownedStatus = ownership.GetItemStatus(target.ItemId);
-                    var owned = ownedStatus.IsOwned;
-
-                    // Ownership is the strongest visible state. Glamour-dresser
-                    // ownership is intentionally distinct from ordinary possession.
-                    // Unresolved remains red only when the target is not owned.
-                    if (owned)
-                        ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(ownedStatus) ? GlamourPink : OwnedGreen);
-                    else if (!resolved)
-                        ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
-
-                    if (ImGui.Selectable(target.Name, selected))
-                    {
-                        config.SelectedItemId = target.ItemId;
-                        config.SelectedChainIndex = 0;
-
-                        if (!string.IsNullOrWhiteSpace(targetSearch))
-                        {
-                            config.SelectedCategory = target.Category;
-                            config.SelectedJob = "All";
-                        }
-
-                        SaveConfig();
-                    }
-
-                    if (owned || !resolved)
-                        ImGui.PopStyleColor();
-
-                    if (selected)
-                        ImGui.SetItemDefaultFocus();
-                }
-            }
-
-            ImGui.EndCombo();
-        }
-
-        DrawCommonTargetControls();
     }
 
     private void DrawCommonTargetControls()
@@ -1527,15 +2189,12 @@ public sealed class Plugin : IDalamudPlugin
         {
             // Manual refreshes are deliberately rate-limited so repeated clicks
             // cannot hammer community services or create avoidable network load.
-            nextManualSourceRefreshUtc = DateTime.UtcNow.AddSeconds(15);
+            nextManualSourceRefreshUtc = DateTime.UtcNow.AddMinutes(5);
             coverageMetricsExpiresUtc = DateTime.MinValue;
             _ = collectibleSources.RefreshAsync();
-
-            _ = garlandSources.RefreshAsync(
-                catalog.Targets
-                    .Where(target => resolver.NeedsGarlandEnrichment(target))
-                    .Select(target => target.ItemId),
-                force: true);
+            // Garland is intentionally target-scoped. A manual refresh must not
+            // fan out into thousands of per-item HTTP requests. Select an item
+            // that still needs enrichment to request that one document.
         }
     }
 
@@ -1595,8 +2254,27 @@ public sealed class Plugin : IDalamudPlugin
             var action = actionGuidance.Resolve(result);
             if (!action.IsEmpty)
             {
-                var who = string.IsNullOrWhiteSpace(action.GoTo) ? string.Empty : $" — Go to {action.GoTo}";
-                ImGui.BulletText($"{member.Name} — {action.ActionLabel}: {action.ActionText}{who}");
+                var run = action.ActionLabel.Equals("Run", StringComparison.OrdinalIgnoreCase);
+
+                // The member/item name reflects ownership of the item itself. An unlocked
+                // acquisition duty does not make the item owned, so only the duty/action
+                // portion uses the green unlocked visual language.
+                ImGui.Bullet();
+                ImGui.SameLine();
+                ImGui.TextUnformatted($"{member.Name} — ");
+                ImGui.SameLine(0.0f, 0.0f);
+                if (run)
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                ImGui.TextUnformatted($"{action.ActionLabel}: {action.ActionText}");
+                if (run)
+                    ImGui.PopStyleColor();
+
+                if (!string.IsNullOrWhiteSpace(action.GoTo))
+                {
+                    ImGui.Indent();
+                    DrawCombinedWhoWhereLine("Go to", action.GoTo, $"set-member-{member.ItemId}");
+                    ImGui.Unindent();
+                }
                 continue;
             }
 
@@ -2096,74 +2774,25 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Spacing();
 
-        RefreshCoverageMetrics();
-        var unresolvedCount = cachedUnresolvedCount;
-
+        // Never scan/resolve the full catalog from Draw(). v1.1.12.6 made
+        // provenance resolution more thorough, which turned the old automatic
+        // two-second coverage refresh into a very expensive render-thread task.
+        // Full-catalog analysis now happens only through the explicit Ambiguity
+        // Audit export; normal Debug rendering stays O(1).
         ImGui.TextDisabled($"Catalog targets: {catalog.Targets.Count:N0}");
-        ImGui.TextDisabled($"Direct-source coverage: {cachedDirectCount:N0} / {catalog.Targets.Count:N0}");
-        ImGui.TextDisabled($"Unresolved targets: {unresolvedCount:N0}");
         ImGui.TextDisabled($"Target sets: {setCatalog.Sets.Count:N0}");
         ImGui.TextDisabled(
             $"Job progression targets: {jobCatalog.Jobs.Count:N0} " +
             $"({jobCatalog.Jobs.Count(j => j.UnlockQuest is not null):N0} with unlock quest; " +
             $"{jobCatalog.Jobs.Sum(j => j.Progression.Count):N0} formal quest nodes)");
         ImGui.TextDisabled($"Pinned targets: {config.PinnedTargets.Count:N0}");
-        var pollingRemaining = ownershipPollingEndsUtc > DateTime.UtcNow
-            ? Math.Max(0, (ownershipPollingEndsUtc - DateTime.UtcNow).TotalSeconds)
-            : 0;
         ImGui.TextDisabled(
-            $"Ownership polling: {(pollingRemaining > 0 ? $"active ({pollingRemaining:F1}s remaining)" : "idle")}; " +
-            $"last framework slice={ownership.LastPollDurationMs:F2} ms; " +
-            $"permanent candidates={ownership.PermanentCandidateCount:N0}");
+            $"Ownership scan: {(ownershipPollingActive ? "active (one-shot full pass)" : "idle")}; " +
+            $"permanent={ownership.PermanentCandidateCursor:N0}/{ownership.PermanentCandidateCount:N0}; " +
+            $"duties={dutyUnlocks.PollingCursor:N0}/{dutyUnlocks.PollingCandidateCount:N0}");
+        ImGui.TextDisabled("Catalog-wide resolver coverage is computed only by the on-demand Ambiguity Audit (never during UI rendering).");
         if (!string.IsNullOrWhiteSpace(releaseDiagnosticsStatus))
             ImGui.TextDisabled($"Configuration diagnostic: {releaseDiagnosticsStatus}");
-
-        var tierSummary = string.Join(
-            ", ",
-            cachedResolutionTiers
-                .OrderByDescending(x => x.Value)
-                .Select(x => $"{x.Key}={x.Value:N0}"));
-
-        if (!string.IsNullOrWhiteSpace(tierSummary))
-            ImGui.TextDisabled($"Resolution tiers: {tierSummary}");
-
-        var specificitySummary = string.Join(
-            ", ",
-            cachedSpecificity
-                .OrderByDescending(x => x.Value)
-                .Select(x => $"{x.Key}={x.Value:N0}"));
-        if (!string.IsNullOrWhiteSpace(specificitySummary))
-            ImGui.TextDisabled($"Source specificity: {specificitySummary}");
-
-        var namedSpecificityCount = cachedSpecificity
-            .Where(x => x.Key.StartsWith("Named ", StringComparison.OrdinalIgnoreCase))
-            .Sum(x => x.Value);
-        var namedSpecificityPercent = catalog.Targets.Count > 0
-            ? (100.0 * namedSpecificityCount / catalog.Targets.Count)
-            : 0.0;
-        ImGui.TextDisabled(
-            $"Named-source specificity coverage: {namedSpecificityCount:N0} / {catalog.Targets.Count:N0} ({namedSpecificityPercent:F1}%)");
-        ImGui.TextDisabled(
-            $"Specificity backlog: {cachedSpecificityEnrichmentCandidates:N0}");
-
-        var exactSpecificityCount = cachedSpecificity
-            .Where(x => x.Key.Equals("Named item-specific", StringComparison.OrdinalIgnoreCase))
-            .Sum(x => x.Value);
-        var exactSpecificityPercent = catalog.Targets.Count > 0
-            ? (100.0 * exactSpecificityCount / catalog.Targets.Count)
-            : 0.0;
-        ImGui.TextDisabled(
-            $"Exact item-specific coverage: {exactSpecificityCount:N0} / {catalog.Targets.Count:N0} ({exactSpecificityPercent:F1}%)");
-        ImGui.TextDisabled(
-            $"Exact-source backlog: {cachedExactSpecificityBacklog:N0}");
-
-        var availabilitySummary = string.Join(
-            ", ",
-            cachedAvailability
-                .OrderByDescending(x => x.Value)
-                .Select(x => $"{x.Key}={x.Value:N0}"));
-        if (!string.IsNullOrWhiteSpace(availabilitySummary))
-            ImGui.TextDisabled($"Availability classes: {availabilitySummary}");
 
         ImGui.TextDisabled(
             $"Supplemental data: Store={supplemental.StoreItems.Count:N0}, " +
@@ -2250,7 +2879,82 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Spacing();
 
-        if (ImGui.Button($"Export unresolved CSV ({unresolvedCount})"))
+        if (ImGui.Button("Clear cached items"))
+        {
+            ownershipPollingActive = false;
+            var removedDresserSnapshot = ownership.ClearCachedOwnershipForCurrentCharacter();
+            exportStatus = removedDresserSnapshot
+                ? "Cleared cached ownership for this character, including its saved Glamour Dresser snapshot. Run /cqg to start a fresh full ownership scan."
+                : "Cleared cached ownership for this character. Run /cqg to start a fresh full ownership scan.";
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Clears CQG's cached item/job ownership state for the current character. " +
+                "This also clears the saved Glamour Dresser ownership snapshot, but does not clear acquisition-source or duty resolver caches. " +
+                "Run /cqg afterward for a fresh one-shot ownership scan.");
+        }
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Clear network caches"))
+        {
+            var collectibleCleared = collectibleSources.ClearSessionCache();
+            var garlandItemsCleared = garlandSources.ClearCache();
+            var garlandDutiesCleared = garlandDutyUnlocks.ClearCache();
+            var communityDutiesCleared = communityDutyUnlocks.ClearCache();
+
+            if (collectibleCleared && garlandItemsCleared && garlandDutiesCleared && communityDutiesCleared)
+            {
+                networkRequests.Reset();
+                nextManualSourceRefreshUtc = DateTime.MinValue;
+                coverageMetricsExpiresUtc = DateTime.MinValue;
+                exportStatus =
+                    "Cleared persisted/community network caches and FFXIV Collect session data. " +
+                    "The next unresolved target may perform fresh, rate-limited network lookups.";
+            }
+            else
+            {
+                exportStatus =
+                    "Could not clear every network cache because a network lookup/refresh is currently active. " +
+                    "Wait for it to finish and try again.";
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Deletes CQG's persisted Community Duty, Garland Item, and Garland Duty caches, " +
+                "clears FFXIV Collect data loaded in this plugin session, and resets network diagnostics. " +
+                "This does not clear item ownership or Glamour Dresser ownership. " +
+                "Use this only for diagnostics/fresh-network testing; normal users should leave network caches intact to minimize HTTP traffic.");
+        }
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Output target information"))
+            OutputTargetInformation(selectedResult, selectedSet);
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Writes everything CQG currently knows about the selected target to a text file. " +
+                "This is a read-only snapshot: pressing this button never starts a network request. " +
+                "Already-cached community data is included when present.");
+        }
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Export ambiguity audit"))
+            ExportAmbiguityAuditCsv();
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Audits ambiguous/incomplete item resolutions using only local game data and already-cached community data. " +
+                "The audit makes ZERO network calls. Cases that could normally use uncached community enrichment are marked 'missing network data'.");
+        }
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Export unresolved CSV"))
             ExportUnresolvedCsv();
 
         ImGui.SameLine();
@@ -2847,6 +3551,489 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private void OutputTargetInformation(
+        AcquisitionResult? selectedResult,
+        TargetSet? selectedSet)
+    {
+        try
+        {
+            if (selectedResult is null && selectedSet is null)
+            {
+                exportStatus = "No item or set target is currently selected.";
+                return;
+            }
+
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
+            var path = Path.Combine(directory, $"CustomQuestGuide-TargetInformation-{stamp}.txt");
+            var output = new StringBuilder();
+            output.AppendLine("Custom Quest Guide — selected target information");
+            output.AppendLine("READ-ONLY SNAPSHOT: this export does not start network requests.");
+            output.AppendLine("Cached community data is included when already present.");
+            output.AppendLine();
+
+            if (selectedSet is not null)
+            {
+                output.AppendLine("TARGET TYPE: Set");
+                output.AppendLine($"Set ID: {selectedSet.Id}");
+                output.AppendLine($"Group: {selectedSet.Group}");
+                output.AppendLine($"Name: {selectedSet.Name}");
+                output.AppendLine($"Description: {selectedSet.Description}");
+                output.AppendLine($"Members: {selectedSet.ItemIds.Count}");
+                output.AppendLine($"Completion reward IDs: {string.Join(", ", selectedSet.CompletionRewardItemIds)}");
+                output.AppendLine();
+
+                foreach (var itemId in selectedSet.ItemIds)
+                {
+                    var target = catalog.GetById(itemId);
+                    if (target is null)
+                    {
+                        output.AppendLine($"[{itemId}] <catalog row missing>");
+                        continue;
+                    }
+
+                    output.AppendLine(new string('-', 80));
+                    AppendTargetInformation(output, target, selectedSet.Id);
+                }
+            }
+            else if (selectedResult is not null)
+            {
+                output.AppendLine("TARGET TYPE: Item");
+                AppendTargetInformation(output, selectedResult.Target, FindContainingSet(selectedResult.Target.ItemId)?.Id);
+            }
+
+            File.WriteAllText(path, output.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            exportStatus = $"Output target information to:\n{path}";
+            Log.Information($"Output CQG target information to {path}");
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Target information output failed: {ex.Message}";
+            Log.Error(ex, "Failed to output CQG target information.");
+        }
+    }
+
+    private void AppendTargetInformation(StringBuilder output, TargetEntry target, string? containingSetId)
+    {
+        // IMPORTANT: Resolve() consumes only local/live data plus caches. The
+        // cached-only action/duty methods below explicitly suppress every
+        // EnsureLoaded/EnsureRequested network path.
+        var result = resolver.Resolve(target);
+        var primary = result.Sources.FirstOrDefault();
+        var owned = ownership.GetItemStatus(target.ItemId);
+        var action = actionGuidance.Resolve(result, allowNetworkRequests: false);
+        var availability = resolver.GetAvailabilityState(target);
+        var direct = resolver.HasDirectSource(target);
+        var contradiction = DescribeResolverContradiction(result, action, owned, direct, availability);
+        var collectCached = collectibleSources.GetSources(target.ItemId);
+        var garlandCached = garlandSources.GetSources(target.ItemId);
+        var dependencies = resolver.GetExchangeDependencies(target.ItemId);
+
+        output.AppendLine($"Item ID: {target.ItemId}");
+        output.AppendLine($"Name: {target.Name}");
+        output.AppendLine($"Category: {target.Category}");
+        output.AppendLine($"Game UI Category: {target.GameUiCategory}");
+        output.AppendLine($"Filter Group: {target.FilterGroup}");
+        output.AppendLine($"Equip Jobs: {(target.EquipJobs.Count == 0 ? "<none>" : string.Join(", ", target.EquipJobs.OrderBy(x => x)))}");
+        output.AppendLine($"Untradable: {target.IsUntradable}");
+        output.AppendLine($"Owned: {owned.IsOwned}");
+        output.AppendLine($"Ownership Source: {owned.Source}");
+        output.AppendLine($"Containing Set: {containingSetId ?? "<none>"}");
+        output.AppendLine();
+
+        output.AppendLine("RESOLUTION");
+        output.AppendLine($"Resolution Tier: {resolver.GetResolutionTier(target)}");
+        output.AppendLine($"Source Specificity: {resolver.GetSourceSpecificity(target)}");
+        output.AppendLine($"Availability: {availability}");
+        output.AppendLine($"Direct Source Known: {direct}");
+        output.AppendLine($"Curated Fallback Only: {resolver.IsCuratedFallbackOnly(target)}");
+        output.AppendLine($"Needs Specificity Enrichment: {resolver.NeedsSpecificityEnrichment(target)}");
+        output.AppendLine($"Needs Exact Item Specificity: {resolver.NeedsExactItemSpecificity(target)}");
+        output.AppendLine($"Garland Enrichment Eligible: {resolver.NeedsGarlandEnrichment(target)}");
+        output.AppendLine($"Contradiction Check: {(string.IsNullOrWhiteSpace(contradiction) ? "<none>" : contradiction)}");
+        output.AppendLine();
+
+        output.AppendLine("CURRENT PRIMARY / ACTION");
+        output.AppendLine($"Primary: {(primary is null ? "<none>" : FormatSourceForDiagnostic(primary))}");
+        output.AppendLine($"Action Label: {action.ActionLabel}");
+        output.AppendLine($"Action Text: {action.ActionText}");
+        output.AppendLine($"Action GoTo: {action.GoTo}");
+        output.AppendLine($"Action QuestStartedBy: {action.QuestStartedBy}");
+        output.AppendLine($"Action Source: {(action.Source is null ? "<none>" : FormatSourceForDiagnostic(action.Source))}");
+        output.AppendLine();
+
+        output.AppendLine($"ALL CURRENT RESOLVED SOURCES ({result.Sources.Count})");
+        if (result.Sources.Count == 0)
+            output.AppendLine("  <none>");
+        for (var i = 0; i < result.Sources.Count; i++)
+            output.AppendLine($"  [{i}] {FormatSourceForDiagnostic(result.Sources[i])}");
+        output.AppendLine();
+
+        output.AppendLine("CACHED COMMUNITY DATA");
+        output.AppendLine($"FFXIV Collect cached source count: {collectCached.Count}");
+        foreach (var source in collectCached)
+            output.AppendLine($"  Collect: {FormatSourceForDiagnostic(source)}");
+        output.AppendLine($"Garland item checked/cached: {garlandSources.IsChecked(target.ItemId)}");
+        output.AppendLine($"Garland item cached miss: {garlandSources.IsCachedMiss(target.ItemId)}");
+        output.AppendLine($"Garland cached source count: {garlandCached.Count}");
+        foreach (var source in garlandCached)
+            output.AppendLine($"  Garland: {FormatSourceForDiagnostic(source)}");
+        if (resolver.NeedsGarlandEnrichment(target) && !garlandSources.IsChecked(target.ItemId))
+            output.AppendLine("  Network status: missing network data (eligible item has no cached Garland lookup result)");
+        output.AppendLine();
+
+        output.AppendLine($"EXCHANGE DEPENDENCIES ({dependencies.Count})");
+        if (dependencies.Count == 0)
+            output.AppendLine("  <none>");
+        foreach (var dependency in dependencies)
+        {
+            output.AppendLine(
+                $"  CostItemId={dependency.CostItemId}; CostItem={dependency.CostItemName}; Amount={dependency.Amount}; " +
+                $"Shop={dependency.ShopName}; NPCs={(dependency.NpcNames.Count == 0 ? "<none>" : string.Join(" | ", dependency.NpcNames))}");
+
+            var costSources = resolver.GetKnownSourcesForItemId(dependency.CostItemId);
+            output.AppendLine($"    Cost item current sources ({costSources.Count}):");
+            foreach (var source in costSources)
+                output.AppendLine($"      {FormatSourceForDiagnostic(source)}");
+
+            var costTarget = catalog.GetById(dependency.CostItemId);
+            if (costTarget is not null &&
+                resolver.NeedsGarlandEnrichment(costTarget) &&
+                !garlandSources.IsChecked(costTarget.ItemId))
+            {
+                output.AppendLine("      Network status: missing network data (cost item is eligible for uncached Garland enrichment)");
+            }
+            else if (costSources.Count == 0 && !garlandSources.IsChecked(dependency.CostItemId))
+            {
+                output.AppendLine("      Network status: missing network data (dependency has no cached exact source)");
+            }
+        }
+        output.AppendLine();
+
+        output.AppendLine("SUPPLEMENTAL RAW RELATIONSHIPS");
+        if (supplemental.DutyReferencesByItem.TryGetValue(target.ItemId, out var dutyRefs) && dutyRefs.Count > 0)
+        {
+            output.AppendLine($"  Duty references ({dutyRefs.Count}): {string.Join(" | ", dutyRefs.Select(x => $"{x.Kind}:{x.Id}"))}");
+        }
+        else
+        {
+            output.AppendLine("  Duty references: <none>");
+        }
+
+        if (supplemental.ItemSources.TryGetValue(target.ItemId, out var supplementalRows) && supplementalRows.Count > 0)
+        {
+            output.AppendLine($"  Supplemental source rows ({supplementalRows.Count}):");
+            foreach (var row in supplementalRows)
+            {
+                var fields = string.Join("; ", row.Row.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase).Select(x => $"{x.Key}={x.Value}"));
+                output.AppendLine($"    Dataset={row.Dataset}; Kind={row.Kind}; {fields}");
+            }
+        }
+        else
+        {
+            output.AppendLine("  Supplemental source rows: <none>");
+        }
+        output.AppendLine();
+
+        var resolvedDuties = result.Sources
+            .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var supplementalDutyCandidates = resolver.GetSupplementalDutyCandidateNames(target.ItemId);
+        var duties = resolvedDuties
+            .Concat(supplementalDutyCandidates)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        output.AppendLine($"DUTY CANDIDATES ({duties.Length})");
+        if (duties.Length == 0)
+            output.AppendLine("  <none>");
+        foreach (var duty in duties)
+        {
+            var provenance = resolvedDuties.Contains(duty, StringComparer.OrdinalIgnoreCase)
+                ? "resolved/current"
+                : "supplemental candidate (suppressed from current answer)";
+            output.AppendLine($"  [{provenance}]");
+            AppendDutyDiagnostic(output, duty, containingSetId, "    ");
+        }
+
+        if (result.Guide is not null)
+        {
+            output.AppendLine();
+            output.AppendLine($"CURATED GUIDE: {result.Guide.Name}");
+            foreach (var chain in result.Guide.Chains)
+            {
+                output.AppendLine($"  Chain: {chain.Name} — {chain.Description}");
+                foreach (var step in chain.Steps)
+                    output.AppendLine($"    {step.QuestName} | {step.QuestGiver} | {step.Zone} ({step.X:F1},{step.Y:F1}) | {step.Note}");
+            }
+        }
+    }
+
+    private void AppendDutyDiagnostic(StringBuilder output, string dutyName, string? setId, string indent)
+    {
+        var cfcId = dutyUnlocks.GetContentFinderConditionId(dutyName);
+        var instanceId = dutyUnlocks.GetInstanceContentId(dutyName);
+        var advice = string.IsNullOrWhiteSpace(setId)
+            ? dutyUnlocks.GetAdviceCachedOnly(dutyName)
+            : dutyUnlocks.GetAdviceCachedOnly(setId, dutyName);
+        var communityQuest = communityDutyUnlocks.GetCachedQuestId(dutyName);
+        var garlandQuest = instanceId == 0 ? null : garlandDutyUnlocks.GetCachedQuestId(instanceId);
+        var garlandChecked = instanceId != 0 && garlandDutyUnlocks.IsChecked(instanceId);
+
+        output.AppendLine($"{indent}{dutyName}");
+        output.AppendLine($"{indent}  ContentFinderConditionId: {cfcId}");
+        output.AppendLine($"{indent}  InstanceContentId: {instanceId}");
+        output.AppendLine($"{indent}  Unlock snapshot: {dutyUnlocks.IsDutyUnlocked(dutyName)?.ToString() ?? "unknown"}");
+        output.AppendLine($"{indent}  Cached community quest ID: {(communityQuest?.ToString() ?? "<none>")}");
+        output.AppendLine($"{indent}  Cached Garland checked: {garlandChecked}");
+        output.AppendLine($"{indent}  Cached Garland quest ID: {(garlandQuest?.ToString() ?? "<none>")}");
+        if (advice is null)
+        {
+            output.AppendLine($"{indent}  Cached/local advice: <none>");
+            return;
+        }
+
+        output.AppendLine($"{indent}  Advice quest: {advice.QuestName}");
+        output.AppendLine($"{indent}  Advice contact: {advice.Contact}");
+        output.AppendLine($"{indent}  Advice location: {advice.Location}");
+        output.AppendLine($"{indent}  Advice note: {advice.Note}");
+    }
+
+    private static string FormatSourceForDiagnostic(SourceEntry source) =>
+        $"Kind={source.Kind}; Name={source.Name}; Detail={source.Detail ?? string.Empty}; " +
+        $"Unlocked={(source.IsUnlocked.HasValue ? source.IsUnlocked.Value.ToString() : "unknown")}; " +
+        $"Priority={source.Priority}; SpecificityHint={source.SpecificityHint ?? string.Empty}";
+
+    private void ExportAmbiguityAuditCsv()
+    {
+        try
+        {
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var fileName = $"CustomQuestGuide-AmbiguityAudit-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.csv";
+            var path = Path.Combine(directory, fileName);
+            var csv = new StringBuilder();
+
+            csv.AppendLine(
+                "Item ID,Name,Category,Game UI Category,Filter Group,Equip Jobs,Owned,Ownership Source," +
+                "Ambiguity Reasons,Missing Network Data,Resolution Tier,Source Specificity,Availability," +
+                "Direct Source Known,Curated Fallback Only,Needs Specificity Enrichment,Needs Exact Item Specificity," +
+                "Garland Enrichment Eligible,Garland Cached Checked,Garland Cached Miss," +
+                "Primary Source,Current Action Label,Current Action Text,Current Action Location," +
+                "All Current Sources,Cached FFXIV Collect Sources,Cached Garland Sources," +
+                "Exchange Dependencies,Supplemental Duty References,Supplemental Duty Candidate Names,Supplemental Raw Rows,Duty Diagnostics,Contradiction Check");
+
+            var exported = 0;
+            foreach (var target in catalog.Targets
+                         .OrderBy(t => t.Category, StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                var result = resolver.Resolve(target);
+                var primary = result.Sources.FirstOrDefault();
+                var owned = ownership.GetItemStatus(target.ItemId);
+                var action = actionGuidance.Resolve(result, allowNetworkRequests: false);
+                var availability = resolver.GetAvailabilityState(target);
+                var direct = resolver.HasDirectSource(target);
+                var contradiction = DescribeResolverContradiction(result, action, owned, direct, availability);
+                var dependencies = resolver.GetExchangeDependencies(target.ItemId);
+                var reasons = new List<string>();
+                var missingNetwork = new List<string>();
+
+                // A client-data item with explicitly unknown/future availability is
+                // already being described truthfully. It is not a resolver ambiguity
+                // and should not pollute the actionable acquisition audit.
+                if (availability.Equals("Future / Unknown", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (result.Sources.Count == 0 && result.Guide is null)
+                    reasons.Add("No source resolved");
+                if (resolver.NeedsSpecificityEnrichment(target))
+                    reasons.Add("Source specificity incomplete");
+                if (resolver.NeedsExactItemSpecificity(target))
+                    reasons.Add("Exact item-specific source missing");
+                if (!string.IsNullOrWhiteSpace(contradiction))
+                    reasons.Add("Resolver contradiction");
+                if (primary is not null &&
+                    (primary.Name.Contains("exact duty unresolved", StringComparison.OrdinalIgnoreCase) ||
+                     primary.Detail?.Contains("exact duty unresolved", StringComparison.OrdinalIgnoreCase) == true ||
+                     primary.Detail?.Contains("exact item-specific duty", StringComparison.OrdinalIgnoreCase) == true ||
+                     primary.Name.Equals("Duty Chest", StringComparison.OrdinalIgnoreCase) ||
+                     primary.Name.Equals("Duty Boss", StringComparison.OrdinalIgnoreCase) ||
+                     primary.Name.Equals("Duty Boss Chest", StringComparison.OrdinalIgnoreCase) ||
+                     primary.Name.Equals("Duty / Instance Drop", StringComparison.OrdinalIgnoreCase)))
+                {
+                    reasons.Add("Duty family known but exact duty unresolved");
+                }
+
+                var resolvedDuties = result.Sources
+                    .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Cast<string>()
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var supplementalDutyCandidates = resolver.GetSupplementalDutyCandidateNames(target.ItemId);
+
+                // Multiple exact/current duties can be legitimate for materials or
+                // currencies. Flag only unresolved supplemental ambiguity, where CQG
+                // lacks an authoritative item-specific duty and therefore cannot say
+                // which candidate is the intended acquisition route.
+                if (supplementalDutyCandidates.Count > 1 &&
+                    resolvedDuties.Length == 0 &&
+                    !garlandSources.HasSource(target.ItemId))
+                {
+                    reasons.Add($"Conflicting supplemental duty candidates ({supplementalDutyCandidates.Count})");
+                }
+
+                var dutiesForDiagnostics = resolvedDuties
+                    .Concat(supplementalDutyCandidates)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+                var dutyDiagnostics = new List<string>();
+                var containingSetId = FindContainingSet(target.ItemId)?.Id;
+                foreach (var duty in dutiesForDiagnostics)
+                {
+                    var cfcId = dutyUnlocks.GetContentFinderConditionId(duty);
+                    var instanceId = dutyUnlocks.GetInstanceContentId(duty);
+                    var advice = string.IsNullOrWhiteSpace(containingSetId)
+                        ? dutyUnlocks.GetAdviceCachedOnly(duty)
+                        : dutyUnlocks.GetAdviceCachedOnly(containingSetId, duty);
+                    var communityQuest = communityDutyUnlocks.GetCachedQuestId(duty);
+                    var garlandQuest = instanceId == 0 ? null : garlandDutyUnlocks.GetCachedQuestId(instanceId);
+                    var garlandChecked = instanceId != 0 && garlandDutyUnlocks.IsChecked(instanceId);
+                    var note = advice?.Note ?? string.Empty;
+                    var isCurrent = resolvedDuties.Contains(duty, StringComparer.OrdinalIgnoreCase);
+
+                    if (note.Contains("Missing network data", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Keep suppressed candidates in the diagnostic trail, but
+                        // do not classify their missing enrichment as an active
+                        // problem once CQG has a different authoritative duty.
+                        // An already-unlocked current duty also does not need an
+                        // unlock-quest network lookup.
+                        if (isCurrent && dutyUnlocks.IsDutyUnlocked(duty) != true)
+                            missingNetwork.Add($"Duty {duty}: {note}");
+                    }
+                    else if (isCurrent &&
+                             advice is not null &&
+                             advice.IsUnlocked != true &&
+                             string.IsNullOrWhiteSpace(advice.QuestName))
+                    {
+                        reasons.Add($"Locked duty has no resolved unlock quest: {duty}");
+                    }
+
+                    dutyDiagnostics.Add(
+                        $"{duty} [provenance={(isCurrent ? "current" : "supplemental-candidate")}; CFC={cfcId}; Instance={instanceId}; unlocked={dutyUnlocks.IsDutyUnlocked(duty)?.ToString() ?? "unknown"}; " +
+                        $"quest={advice?.QuestName ?? string.Empty}; contact={advice?.Contact ?? string.Empty}; location={advice?.Location ?? string.Empty}; " +
+                        $"communityQuest={communityQuest?.ToString() ?? string.Empty}; garlandChecked={garlandChecked}; garlandQuest={garlandQuest?.ToString() ?? string.Empty}; note={note}]");
+                }
+
+                if (resolver.NeedsGarlandEnrichment(target) && !garlandSources.IsChecked(target.ItemId))
+                    missingNetwork.Add("Item-specific Garland enrichment is eligible but not cached");
+
+                if (dependencies.Count > 0)
+                {
+                    foreach (var dependency in dependencies)
+                    {
+                        // Gil is a universal terminal currency, not an acquisition
+                        // dependency that needs its own resolver chain. Asking CQG to
+                        // explain where Gil comes from adds noise rather than guidance.
+                        if (dependency.CostItemName.Equals("Gil", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var costSources = resolver.GetKnownSourcesForItemId(dependency.CostItemId);
+                        if (costSources.Count == 0)
+                        {
+                            reasons.Add($"Exchange dependency source unresolved: {dependency.CostItemName}");
+                            if (!garlandSources.IsChecked(dependency.CostItemId))
+                                missingNetwork.Add($"Exchange cost item {dependency.CostItemName}: missing network data");
+                        }
+
+                        var costTarget = catalog.GetById(dependency.CostItemId);
+                        if (costTarget is not null &&
+                            resolver.NeedsGarlandEnrichment(costTarget) &&
+                            !garlandSources.IsChecked(costTarget.ItemId))
+                        {
+                            missingNetwork.Add($"Exchange cost item {dependency.CostItemName} is eligible for uncached Garland enrichment");
+                        }
+                    }
+                }
+
+                if (IsShopDiagnostic(primary) && action.IsEmpty)
+                    reasons.Add("Shop/exchange source lacks actionable vendor/location guidance");
+
+                if (reasons.Count == 0 && missingNetwork.Count == 0)
+                    continue;
+
+                exported++;
+                var collectCached = collectibleSources.GetSources(target.ItemId);
+                var garlandCached = garlandSources.GetSources(target.ItemId);
+                supplemental.DutyReferencesByItem.TryGetValue(target.ItemId, out var dutyRefs);
+                supplemental.ItemSources.TryGetValue(target.ItemId, out var supplementalRows);
+
+                var allSources = string.Join(" || ", result.Sources.Select(FormatSourceForDiagnostic));
+                var collectSources = string.Join(" || ", collectCached.Select(FormatSourceForDiagnostic));
+                var garlandSourcesText = string.Join(" || ", garlandCached.Select(FormatSourceForDiagnostic));
+                var dependencyText = string.Join(" || ", dependencies.Select(x =>
+                    $"CostItemId={x.CostItemId}; CostItem={x.CostItemName}; Amount={x.Amount}; Shop={x.ShopName}; NPCs={string.Join(" | ", x.NpcNames)}"));
+                var dutyRefText = dutyRefs is null
+                    ? string.Empty
+                    : string.Join(" || ", dutyRefs.Select(x => $"{x.Kind}:{x.Id}"));
+                var supplementalDutyCandidateText = string.Join(" || ", supplementalDutyCandidates);
+                var supplementalText = supplementalRows is null
+                    ? string.Empty
+                    : string.Join(" || ", supplementalRows.Select(row =>
+                        $"Dataset={row.Dataset}; Kind={row.Kind}; " +
+                        string.Join("; ", row.Row.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase).Select(x => $"{x.Key}={x.Value}"))));
+
+                var fields = new[]
+                {
+                    target.ItemId.ToString(), target.Name, target.Category, target.GameUiCategory, target.FilterGroup.ToString(),
+                    string.Join(" | ", target.EquipJobs.OrderBy(x => x)), owned.IsOwned ? "Yes" : "No", owned.Source,
+                    string.Join("; ", reasons.Distinct()), missingNetwork.Count == 0 ? "No" : string.Join("; ", missingNetwork.Distinct()),
+                    resolver.GetResolutionTier(target), resolver.GetSourceSpecificity(target), availability,
+                    direct ? "Yes" : "No", resolver.IsCuratedFallbackOnly(target) ? "Yes" : "No",
+                    resolver.NeedsSpecificityEnrichment(target) ? "Yes" : "No",
+                    resolver.NeedsExactItemSpecificity(target) ? "Yes" : "No",
+                    resolver.NeedsGarlandEnrichment(target) ? "Yes" : "No",
+                    garlandSources.IsChecked(target.ItemId) ? "Yes" : "No",
+                    garlandSources.IsCachedMiss(target.ItemId) ? "Yes" : "No",
+                    primary is null ? string.Empty : FormatSourceForDiagnostic(primary),
+                    action.ActionLabel, action.ActionText,
+                    !string.IsNullOrWhiteSpace(action.GoTo) ? action.GoTo : action.QuestStartedBy,
+                    allSources, collectSources, garlandSourcesText, dependencyText, dutyRefText, supplementalDutyCandidateText, supplementalText,
+                    string.Join(" || ", dutyDiagnostics), contradiction,
+                };
+                csv.AppendLine(string.Join(",", fields.Select(Csv)));
+            }
+
+            File.WriteAllText(path, csv.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            exportStatus = $"Exported ambiguity audit ({exported:N0} entries) to:\n{path}";
+            Log.Information($"Exported {exported:N0} CQG ambiguity audit entries to {path}");
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Ambiguity audit export failed: {ex.Message}";
+            Log.Error(ex, "Failed to export CQG ambiguity audit.");
+        }
+    }
+
+    private static bool IsShopDiagnostic(SourceEntry? source)
+    {
+        if (source is null)
+            return false;
+        return source.Kind.Contains("Vendor", StringComparison.OrdinalIgnoreCase) ||
+               source.Kind.Contains("Shop", StringComparison.OrdinalIgnoreCase) ||
+               source.Name.Contains("Shop", StringComparison.OrdinalIgnoreCase) ||
+               source.Name.Contains("Vendor", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string DescribeResolverContradiction(
         AcquisitionResult result,
         SourceActionGuidance action,
@@ -2858,8 +4045,10 @@ public sealed class Plugin : IDalamudPlugin
 
         if (directSourceKnown && result.Sources.Count == 0 && result.Guide is null)
             issues.Add("Direct source flag without a source/guide");
-        if (!directSourceKnown && (result.Sources.Count > 0 || result.Guide is not null))
-            issues.Add("Source/guide exists while direct-source flag is false");
+        var hasMeaningfulResolvedSource = result.Sources.Any(source =>
+            !source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase));
+        if (!directSourceKnown && (hasMeaningfulResolvedSource || result.Guide is not null))
+            issues.Add("Actionable source/guide exists while direct-source flag is false");
         if (!action.IsEmpty && action.Source is null)
             issues.Add("Next action has no source provenance");
         if (action.Source is not null && !result.Sources.Contains(action.Source))
@@ -2998,7 +4187,22 @@ public sealed class Plugin : IDalamudPlugin
         {
             ImGui.TextUnformatted("Source:");
             ImGui.SameLine();
-            ImGui.TextUnformatted(primary.Name);
+            var primaryDuty = GetDutyFromSource(primary);
+            var primaryDutyUnlocked = primaryDuty is not null && dutyUnlocks.IsDutyUnlocked(primaryDuty.Name) == true;
+            if (SourceActionGuidanceResolver.TryExtractGatheringLocation(primary, out var gatheringMethod, out var gatheringPlace))
+            {
+                ImGui.TextUnformatted($"{gatheringMethod}:");
+                ImGui.SameLine();
+                DrawClickableLocation(gatheringPlace, $"source-gathering-{result.Target.ItemId}", null);
+            }
+            else
+            {
+                if (primaryDutyUnlocked)
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                ImGui.TextUnformatted(primary.Name);
+                if (primaryDutyUnlocked)
+                    ImGui.PopStyleColor();
+            }
 
             if (!string.IsNullOrWhiteSpace(primary.Detail))
             {
@@ -3020,6 +4224,9 @@ public sealed class Plugin : IDalamudPlugin
             ImGui.SameLine();
             ImGui.TextDisabled("No source resolved yet");
         }
+
+        DrawDutyDependency(result, $"item-{result.Target.ItemId}");
+        DrawExchangePrerequisiteControls(result.Target.ItemId);
 
         if (result.Guide is null)
             DrawSourceActionGuidance(result);
@@ -3055,12 +4262,79 @@ public sealed class Plugin : IDalamudPlugin
                 ImGui.SameLine();
                 ImGui.TextUnformatted(status.Remaining.ToString());
 
-                ImGui.TextUnformatted(status.IsActive ? "Quest started by:" : "Go to:");
-                ImGui.SameLine();
-                ImGui.TextUnformatted(
-                    $"{status.NextStep.QuestGiver} — {status.NextStep.Zone} " +
-                    $"(X: {status.NextStep.X:0.0}, Y: {status.NextStep.Y:0.0})");
+                DrawNpcLocationLine(
+                    status.IsActive ? "Quest started by" : "Go to",
+                    status.NextStep.QuestGiver,
+                    $"{status.NextStep.Zone} (X:{status.NextStep.X:0.0}, Y:{status.NextStep.Y:0.0})",
+                    $"guide-summary-{result.Target.ItemId}");
             }
+        }
+    }
+
+    private void DrawExchangePrerequisiteControls(uint targetItemId)
+    {
+        var dependencies = resolver.GetExchangeDependencies(targetItemId);
+        if (dependencies.Count == 0)
+            return;
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted(dependencies.Count == 1 ? "Prerequisite item:" : "Prerequisite items:");
+
+        for (var i = 0; i < dependencies.Count; i++)
+        {
+            var dependency = dependencies[i];
+            if (dependency.CostItemName.Equals("Gil", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var target = catalog.GetById(dependency.CostItemId);
+            var owned = target is null
+                ? OwnershipStatus.Missing
+                : ownership.GetItemStatus(dependency.CostItemId);
+
+            if (owned.IsOwned)
+                ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(owned) ? GlamourPink : OwnedGreen);
+            ImGui.TextUnformatted($"{dependency.Amount:N0} {dependency.CostItemName}");
+            if (owned.IsOwned)
+                ImGui.PopStyleColor();
+
+            // Tomestones are system currencies, not useful "open this item"
+            // prerequisites. Show the practical repeatable earning route directly
+            // in the compact summary (Detailed off or on) instead of making the
+            // player open the currency target to learn how to farm it.
+            if (dependency.CostItemName.StartsWith("Allagan Tomestone of ", StringComparison.OrdinalIgnoreCase))
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled("— Earn via eligible duties, roulettes, hunts, and other level-capped content");
+                continue;
+            }
+
+            if (target is null)
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled("(not selectable as a CQG target)");
+                continue;
+            }
+
+            // Keep the two prerequisite actions visually identical in size.
+            // Use the wider pin/unpin label as the shared width so neither
+            // button changes size when the pin state changes.
+            var dependencyButtonWidth =
+                Math.Max(ImGui.CalcTextSize("Pin Item").X, ImGui.CalcTextSize("Unpin Item").X) +
+                ImGui.GetStyle().FramePadding.X * 2.0f;
+            var dependencyButtonSize = new Vector2(dependencyButtonWidth, 0);
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Open##dependency-open-{targetItemId}-{dependency.CostItemId}-{i}", dependencyButtonSize))
+                SelectItemTarget(target);
+
+            ImGui.SameLine();
+            DrawPinToggle(
+                "Item",
+                dependency.CostItemId,
+                string.Empty,
+                "Pin Item",
+                "Unpin Item",
+                buttonSize: dependencyButtonSize);
         }
     }
 
@@ -3105,8 +4379,30 @@ public sealed class Plugin : IDalamudPlugin
                     ? ""
                     : $" — {source.Detail}";
 
-                ImGui.BulletText(
-                    $"{source.Kind}: {source.Name}{detail}{suffix}");
+                var duty = GetDutyFromSource(source);
+                var dutyUnlocked = duty is not null && dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
+                if (SourceActionGuidanceResolver.TryExtractGatheringLocation(source, out var detailedMethod, out var detailedPlace))
+                {
+                    ImGui.Bullet();
+                    ImGui.SameLine();
+                    ImGui.TextUnformatted($"{source.Kind}: {detailedMethod}:");
+                    ImGui.SameLine();
+                    DrawClickableLocation(detailedPlace, $"detail-gathering-{result.Target.ItemId}-{detailedPlace}", null);
+                    if (!string.IsNullOrWhiteSpace(detail) || !string.IsNullOrWhiteSpace(suffix))
+                    {
+                        ImGui.SameLine();
+                        ImGui.TextDisabled($"{detail}{suffix}");
+                    }
+                }
+                else
+                {
+                    if (dutyUnlocked)
+                        ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                    ImGui.BulletText(
+                        $"{source.Kind}: {source.Name}{detail}{suffix}");
+                    if (dutyUnlocked)
+                        ImGui.PopStyleColor();
+                }
             }
         }
 
@@ -3161,9 +4457,9 @@ public sealed class Plugin : IDalamudPlugin
                 ImGui.SameLine();
                 ImGui.TextUnformatted(currentStep.QuestName);
                 if (sequence.Active is null)
-                    ImGui.TextWrapped($"Go to: {currentStep.QuestGiver} — {currentStep.Zone} (X: {currentStep.X:0.0}, Y: {currentStep.Y:0.0})");
+                    DrawNpcLocationLine("Go to", currentStep.QuestGiver, $"{currentStep.Zone} (X:{currentStep.X:0.0}, Y:{currentStep.Y:0.0})", $"guide-current-{chainIndex}");
                 else
-                    ImGui.TextDisabled($"Quest started by: {currentStep.QuestGiver} — {currentStep.Zone}");
+                    DrawNpcLocationLine("Quest started by", currentStep.QuestGiver, currentStep.Zone, $"guide-active-{chainIndex}");
             }
         }
 
@@ -3183,9 +4479,7 @@ public sealed class Plugin : IDalamudPlugin
             if (state != QuestProgressState.Completed)
             {
                 ImGui.Indent();
-                ImGui.TextDisabled(
-                    $"{step.QuestGiver} — {step.Zone} " +
-                    $"(X: {step.X:0.0}, Y: {step.Y:0.0})");
+                DrawNpcLocationLine("Go to", step.QuestGiver, $"{step.Zone} (X:{step.X:0.0}, Y:{step.Y:0.0})", $"guide-step-{chainIndex}-{i}");
 
                 if (!string.IsNullOrWhiteSpace(step.Note))
                     ImGui.TextWrapped(step.Note);
@@ -3304,20 +4598,219 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         ImGui.Spacing();
+
+        // NPC/vendor guidance historically encoded "NPC — Location" in ActionText.
+        // Render that through the shared clickable location path instead of as
+        // plain text so vendor/field-operation destinations such as Gerolt —
+        // North Shroud get the same map behavior as quest guidance.
+        if (guidance.ActionLabel.Equals("Go to", StringComparison.OrdinalIgnoreCase))
+        {
+            DrawCombinedWhoWhereLine("Go to", guidance.ActionText, $"guidance-action-{result.Target.ItemId}", guidance.Source?.NpcId);
+            return;
+        }
+
+        var runUnlockedDuty = guidance.ActionLabel.Equals("Run", StringComparison.OrdinalIgnoreCase);
+        if (runUnlockedDuty)
+            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
         ImGui.TextUnformatted($"{guidance.ActionLabel}:");
         ImGui.SameLine();
         ImGui.TextUnformatted(guidance.ActionText);
+        if (runUnlockedDuty)
+            ImGui.PopStyleColor();
 
         if (!string.IsNullOrWhiteSpace(guidance.GoTo))
         {
-            ImGui.TextUnformatted("Go to:");
-            ImGui.SameLine();
-            ImGui.TextUnformatted(guidance.GoTo);
+            DrawCombinedWhoWhereLine("Go to", guidance.GoTo, $"guidance-{result.Target.ItemId}");
         }
         else if (!string.IsNullOrWhiteSpace(guidance.QuestStartedBy))
         {
-            ImGui.TextDisabled($"Quest started by: {guidance.QuestStartedBy}");
+            DrawCombinedWhoWhereLine("Quest started by", guidance.QuestStartedBy, $"guidance-start-{result.Target.ItemId}");
         }
+    }
+
+    private void DrawCombinedWhoWhereLine(string prefix, string value, string id, uint? npcId = null)
+    {
+        var parts = value.Split(" — ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length >= 2)
+        {
+            var npc = parts[0];
+            var location = string.Join(" — ", parts.Skip(1));
+            DrawNpcLocationLine(prefix, npc, location, id, npcId);
+            return;
+        }
+
+        var inferred = npcLocations.GetBestLocation(value);
+        if (!string.IsNullOrWhiteSpace(inferred))
+        {
+            DrawNpcLocationLine(prefix, value, inferred, id, npcId);
+            return;
+        }
+
+        if (npcLocations.GetBestPlaceMapLocation(value) is not null)
+        {
+            DrawLocationOnlyLine(prefix, value, id);
+            return;
+        }
+
+        ImGui.TextUnformatted($"{prefix}: {value}");
+    }
+
+    private void DrawNpcLocationLine(string prefix, string npcName, string? location, string id, uint? npcId = null)
+    {
+        ImGui.TextUnformatted($"{prefix}: {npcName}");
+        if (!string.IsNullOrWhiteSpace(location))
+        {
+            ImGui.SameLine();
+            DrawClickableLocation(location!, id, npcName, npcId);
+        }
+    }
+
+    private void DrawLocationOnlyLine(string prefix, string location, string id)
+    {
+        ImGui.TextUnformatted($"{prefix}:");
+        ImGui.SameLine();
+        DrawClickableLocation(location, id, null);
+    }
+
+    private void DrawClickableLocation(string location, string id, string? npcName, uint? npcId = null)
+    {
+        var displayedPlaceName = GetDisplayedPlaceName(location);
+        var hasInteriorEntranceFallback = TryGetInteriorEntranceFallback(displayedPlaceName, out _, out _, out _);
+
+        var canPin = hasInteriorEntranceFallback;
+        if (!canPin && npcId is > 0)
+            canPin = npcLocations.GetBestMapLocation(npcId.Value) is not null;
+        if (!canPin && !string.IsNullOrWhiteSpace(npcName))
+            canPin = npcLocations.GetBestMapLocation(npcName!) is not null;
+        if (!canPin)
+            canPin = npcLocations.GetBestPlaceMapLocation(displayedPlaceName) is not null;
+        if (!canPin)
+            canPin = TryParseLocationCoordinates(location, out _, out _, out _);
+
+        if (!canPin)
+        {
+            ImGui.TextDisabled(location);
+            return;
+        }
+
+        if (ImGui.SmallButton($"{location}##map-{id}"))
+            OpenMapLocation(location, npcName, npcId);
+
+        if (ImGui.IsItemHovered())
+        {
+            if (hasInteriorEntranceFallback)
+                ImGui.SetTooltip($"This destination is inside {displayedPlaceName}; place a flag at its overworld entrance instead.");
+            else
+                ImGui.SetTooltip("Open the map and place a flag at this location.");
+        }
+    }
+
+    private void OpenMapLocation(string location, string? npcName, uint? npcId = null)
+    {
+        try
+        {
+            var displayedPlaceName = GetDisplayedPlaceName(location);
+
+            // Prefer an explicit exterior entrance for known interior-only places.
+            // The interior coordinates may be perfectly valid inside that territory
+            // while still being useless as a world-map navigation flag.
+            if (TryGetInteriorEntranceFallback(displayedPlaceName, out var entranceZone, out var entranceX, out var entranceY))
+            {
+                if (TryOpenCoordinateMapLink(entranceZone, entranceX, entranceY))
+                    return;
+            }
+
+            if (npcId is > 0 && npcLocations.GetBestMapLocation(npcId.Value) is { } exactNpcMap)
+            {
+                GameGui.OpenMapWithMapLink(exactNpcMap.TerritoryTypeId, exactNpcMap.MapId, exactNpcMap.WorldPosition);
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(npcName) && npcLocations.GetBestMapLocation(npcName!) is { } npcMap)
+            {
+                GameGui.OpenMapWithMapLink(npcMap.TerritoryTypeId, npcMap.MapId, npcMap.WorldPosition);
+                return;
+            }
+
+            // Location labels commonly include '(X:.., Y:..)'. Strip that suffix
+            // before consulting the representative PlaceName index so a named
+            // landmark/entrance can be used when the literal interior coordinate
+            // cannot accept a normal flag.
+            if (npcLocations.GetBestPlaceMapLocation(displayedPlaceName) is { } placeMap)
+            {
+                GameGui.OpenMapWithMapLink(placeMap.TerritoryTypeId, placeMap.MapId, placeMap.WorldPosition);
+                return;
+            }
+
+            if (!TryParseLocationCoordinates(location, out var placeName, out var x, out var y))
+                return;
+
+            TryOpenCoordinateMapLink(placeName, x, y);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, $"Could not open map location '{location}'.");
+        }
+    }
+
+    private static string GetDisplayedPlaceName(string location)
+    {
+        if (TryParseLocationCoordinates(location, out var placeName, out _, out _))
+            return placeName;
+
+        return (location ?? string.Empty).Trim();
+    }
+
+    private static bool TryGetInteriorEntranceFallback(
+        string placeName,
+        out string zone,
+        out float x,
+        out float y)
+    {
+        zone = string.Empty;
+        x = 0f;
+        y = 0f;
+
+        placeName = (placeName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(placeName) ||
+            !InteriorEntranceFallbacks.TryGetValue(placeName, out var fallback))
+            return false;
+
+        zone = fallback.Zone;
+        x = fallback.X;
+        y = fallback.Y;
+        return true;
+    }
+
+    private static bool TryOpenCoordinateMapLink(string placeName, float x, float y)
+    {
+        var link = SeString.CreateMapLink(placeName, x, y);
+        var payload = link?.Payloads.OfType<MapLinkPayload>().FirstOrDefault();
+        if (payload is null)
+            return false;
+
+        GameGui.OpenMapWithMapLink(payload);
+        return true;
+    }
+
+    private static bool TryParseLocationCoordinates(string location, out string placeName, out float x, out float y)
+    {
+        placeName = string.Empty;
+        x = 0;
+        y = 0;
+        if (string.IsNullOrWhiteSpace(location))
+            return false;
+
+        var match = Regex.Match(
+            location,
+            @"^(?<place>.+?)\s*\(\s*X\s*:\s*(?<x>-?\d+(?:\.\d+)?)\s*,\s*Y\s*:\s*(?<y>-?\d+(?:\.\d+)?)\s*\)\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+            return false;
+
+        placeName = match.Groups["place"].Value.Trim();
+        return float.TryParse(match.Groups["x"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out x) &&
+               float.TryParse(match.Groups["y"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out y);
     }
 
     private void RepairSelection()
@@ -3362,6 +4855,21 @@ public sealed class Plugin : IDalamudPlugin
                 config.SelectedClassJobId = progressionJobs[0].ClassJobId;
             }
         }
+
+        if (dutyCatalog.Categories.Count > 0)
+        {
+            if (!dutyCatalog.Categories.Contains(config.SelectedDutyCategory, StringComparer.OrdinalIgnoreCase))
+            {
+                config.SelectedDutyCategory = dutyCatalog.Categories.Contains("Trials", StringComparer.OrdinalIgnoreCase)
+                    ? "Trials"
+                    : dutyCatalog.Categories[0];
+                config.SelectedDutyId = 0;
+            }
+
+            var duty = dutyCatalog.Get(config.SelectedDutyId);
+            if (duty is null || !duty.Category.Equals(config.SelectedDutyCategory, StringComparison.OrdinalIgnoreCase))
+                config.SelectedDutyId = dutyCatalog.GetByCategory(config.SelectedDutyCategory).FirstOrDefault()?.ContentFinderConditionId ?? 0;
+        }
     }
 
     private void SelectFirstTarget()
@@ -3403,6 +4911,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         Items,
         Jobs,
+        Duties,
         Pins,
         Help,
     }

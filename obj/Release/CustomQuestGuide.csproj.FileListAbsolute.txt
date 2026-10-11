@@ -11,3 +11,17 @@ D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Relea
 D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\LuminaSupplemental.Excel.dll
 D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\bin\Release\Sylvan.Data.Csv.dll
 D:\Util\Downloads\CustomQuestGuide-simple-v0.1\CustomQuestGuide-simple\obj\Release\CustomQu.83D7696E.Up2Date
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\CustomQuestGuide.deps.json
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\CustomQuestGuide.dll
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\CSVFile.dll
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\CsvHelper.dll
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\LuminaSupplemental.Excel.dll
+D:\Code\FFXIV Plugins\CustomQuestGuide\bin\Release\Sylvan.Data.Csv.dll
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.csproj.AssemblyReference.cache
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.GeneratedMSBuildEditorConfig.editorconfig
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.AssemblyInfoInputs.cache
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.AssemblyInfo.cs
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.csproj.CoreCompileInputs.cache
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.sourcelink.json
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQu.83D7696E.Up2Date
+D:\Code\FFXIV Plugins\CustomQuestGuide\obj\Release\CustomQuestGuide.dll

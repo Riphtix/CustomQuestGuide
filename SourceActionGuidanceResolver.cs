@@ -30,7 +30,7 @@ public sealed class SourceActionGuidanceResolver
         this.findContainingSet = findContainingSet;
     }
 
-    public SourceActionGuidance Resolve(AcquisitionResult result)
+    public SourceActionGuidance Resolve(AcquisitionResult result, bool allowNetworkRequests = true)
     {
         if (result.Sources.Count == 0)
             return SourceActionGuidance.Empty;
@@ -60,6 +60,24 @@ public sealed class SourceActionGuidanceResolver
         if (!primaryQuest.IsEmpty)
             return primaryQuest;
 
+        // If the direct acquisition route is a shop/vendor, answer the practical
+        // "where do I go?" question before walking dependency duties.  The UI
+        // renders the dependency duty separately, so this gives the player both
+        // halves of an exchange route: vendor location + token source.
+        if (IsShopLike(primary))
+        {
+            var primaryNpc = ExtractNamedNpc(primary);
+            if (!string.IsNullOrWhiteSpace(primaryNpc))
+                return BuildNpcGuidance(primary, primaryNpc!);
+
+            foreach (var alternate in result.Sources.Skip(1).Where(IsShopLike))
+            {
+                var alternateNpc = ExtractNamedNpc(alternate);
+                if (!string.IsNullOrWhiteSpace(alternateNpc))
+                    return BuildNpcGuidance(alternate, alternateNpc!);
+            }
+        }
+
         foreach (var relicSource in result.Sources.Where(x =>
                      x.Kind.Equals("Relic", StringComparison.OrdinalIgnoreCase)))
         {
@@ -76,8 +94,8 @@ public sealed class SourceActionGuidanceResolver
                 continue;
 
             var advice = containingSet is null
-                ? dutyUnlocks.GetAdvice(dutyName)
-                : dutyUnlocks.GetAdvice(containingSet.Id, dutyName);
+                ? (allowNetworkRequests ? dutyUnlocks.GetAdvice(dutyName) : dutyUnlocks.GetAdviceCachedOnly(dutyName))
+                : (allowNetworkRequests ? dutyUnlocks.GetAdvice(containingSet.Id, dutyName) : dutyUnlocks.GetAdviceCachedOnly(containingSet.Id, dutyName));
             if (advice is null)
                 continue;
 
@@ -93,6 +111,16 @@ public sealed class SourceActionGuidanceResolver
                 ? advice.DutyName
                 : $"{advice.DutyName} via {advice.QuestName}";
             return new SourceActionGuidance("Unlock content", route, who, string.Empty, source);
+        }
+
+        if (TryExtractGatheringLocation(primary, out var gatheringMethod, out var gatheringLocation))
+        {
+            return new SourceActionGuidance(
+                gatheringMethod,
+                result.Target.Name,
+                gatheringLocation,
+                string.Empty,
+                primary);
         }
 
         var npc = ExtractNamedNpc(primary);
@@ -115,9 +143,32 @@ public sealed class SourceActionGuidanceResolver
         return SourceActionGuidance.Empty;
     }
 
+    internal static bool TryExtractGatheringLocation(
+        SourceEntry source,
+        out string method,
+        out string location)
+    {
+        method = string.Empty;
+        location = string.Empty;
+
+        if (!source.Kind.Equals("Gathering", StringComparison.OrdinalIgnoreCase) &&
+            !source.Kind.Equals("Fishing", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var colon = source.Name.IndexOf(':');
+        if (colon <= 0 || colon + 1 >= source.Name.Length)
+            return false;
+
+        method = source.Name[..colon].Trim();
+        location = source.Name[(colon + 1)..].Trim();
+        return !string.IsNullOrWhiteSpace(method) && !string.IsNullOrWhiteSpace(location);
+    }
+
     private SourceActionGuidance BuildNpcGuidance(SourceEntry source, string npc)
     {
-        var location = npcLocations.GetBestLocation(npc);
+        var location = source.NpcId is > 0
+            ? npcLocations.GetBestLocation(source.NpcId.Value)
+            : npcLocations.GetBestLocation(npc);
         var who = string.IsNullOrWhiteSpace(location) ? npc : $"{npc} — {location}";
         return new SourceActionGuidance("Go to", who, string.Empty, string.Empty, source);
     }
@@ -131,6 +182,12 @@ public sealed class SourceActionGuidanceResolver
             ? info.QuestGiver!
             : $"{info.QuestGiver} — {info.Location}";
     }
+
+    private static bool IsShopLike(SourceEntry source) =>
+        source.Kind.Contains("Vendor", StringComparison.OrdinalIgnoreCase) ||
+        source.Kind.Contains("Shop", StringComparison.OrdinalIgnoreCase) ||
+        source.Name.Contains("Special / Currency Shop", StringComparison.OrdinalIgnoreCase) ||
+        source.Name.Contains("Vendor", StringComparison.OrdinalIgnoreCase);
 
     private static string? ExtractNamedNpc(SourceEntry source)
     {
@@ -146,6 +203,16 @@ public sealed class SourceActionGuidanceResolver
         if (name.StartsWith("Special / Currency Shop:", StringComparison.OrdinalIgnoreCase) ||
             name.StartsWith("Gil Vendor:", StringComparison.OrdinalIgnoreCase) ||
             name.StartsWith("Grand Company Quartermaster:", StringComparison.OrdinalIgnoreCase))
+        {
+            var dash = name.LastIndexOf(" — ", StringComparison.Ordinal);
+            if (dash >= 0 && dash + 3 < name.Length)
+                return name[(dash + 3)..].Trim();
+        }
+
+        // Garland trade-shop entries are formatted as "Shop Name — NPC".
+        // Source.Kind tells us this is a vendor relationship, so the final
+        // segment is safe to treat as the contact rather than ordinary detail.
+        if (source.Kind.Contains("Vendor", StringComparison.OrdinalIgnoreCase))
         {
             var dash = name.LastIndexOf(" — ", StringComparison.Ordinal);
             if (dash >= 0 && dash + 3 < name.Length)

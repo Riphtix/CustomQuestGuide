@@ -7,7 +7,7 @@ namespace CustomQuestGuide;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 10;
+    public int Version { get; set; } = 11;
 
     public bool Detailed { get; set; } = false;
     public bool Debug { get; set; } = false;
@@ -30,6 +30,10 @@ public sealed class Configuration : IPluginConfiguration
     public string SelectedProgressionCategory { get; set; } = "Combat Classes & Jobs";
     public uint SelectedClassJobId { get; set; } = 0;
 
+    // Duties tab selection. Duty IDs are ContentFinderCondition row IDs.
+    public string SelectedDutyCategory { get; set; } = "Trials";
+    public uint SelectedDutyId { get; set; } = 0;
+
     // Relic-set view selection. Empty means pick the first job represented by the set.
     public string SelectedRelicJob { get; set; } = string.Empty;
 
@@ -46,7 +50,7 @@ public sealed class Configuration : IPluginConfiguration
 [Serializable]
 public sealed class PinnedTargetConfig
 {
-    // "Item", "Set", "JobUnlock", or "JobProgression".
+    // "Item", "Set", "JobUnlock", "JobProgression", or "Duty".
     public string Kind { get; set; } = string.Empty;
 
     // Item ID or ClassJob row ID depending on Kind.

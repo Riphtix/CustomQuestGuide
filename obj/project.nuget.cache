@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "IGil/n6/iz0=",
+  "dgSpecHash": "iByEPkIxG/c=",
   "success": true,
-  "projectFilePath": "D:\\Util\\Downloads\\CustomQuestGuide-simple-v0.1\\CustomQuestGuide-simple\\CustomQuestGuide.csproj",
+  "projectFilePath": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\cmriv\\.nuget\\packages\\csvfile\\3.2.1\\csvfile.3.2.1.nupkg.sha512",
     "C:\\Users\\cmriv\\.nuget\\packages\\csvhelper\\30.0.1\\csvhelper.30.0.1.nupkg.sha512",

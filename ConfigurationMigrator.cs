@@ -11,7 +11,7 @@ namespace CustomQuestGuide;
 /// </summary>
 public static class ConfigurationMigrator
 {
-    public const int CurrentVersion = 10;
+    public const int CurrentVersion = 11;
 
     private static readonly HashSet<string> ValidPinKinds = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -19,6 +19,7 @@ public static class ConfigurationMigrator
         "Set",
         "JobUnlock",
         "JobProgression",
+        "Duty",
     };
 
     public static bool Migrate(Configuration config)
@@ -55,6 +56,11 @@ public static class ConfigurationMigrator
         if (config.SelectedProgressionCategory is null)
         {
             config.SelectedProgressionCategory = "Combat Classes & Jobs";
+            changed = true;
+        }
+        if (config.SelectedDutyCategory is null)
+        {
+            config.SelectedDutyCategory = "Trials";
             changed = true;
         }
         if (config.SelectedRelicJob is null)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Plugin.Services;
@@ -39,6 +40,12 @@ public sealed class SourceResolver
     // Named retainer-venture labels indexed by both RetainerTask and linked task row IDs.
     private readonly Dictionary<uint, string> retainerVentureLabelsById = [];
 
+    // Retail ENpcBase data also contains shop references. LuminaSupplemental has
+    // the cleanest reverse index, but building this local fallback dramatically
+    // improves vendor/location coverage when supplemental ENpcShop rows are
+    // incomplete or use a different schema revision.
+    private readonly Dictionary<uint, HashSet<uint>> retailShopNpcIds = [];
+
     public int CuratedFallbackItemCount => curatedFallbackSources.Count;
 
     public int CuratedFallbackOnlyCount =>
@@ -76,6 +83,11 @@ public sealed class SourceResolver
     private readonly Dictionary<string, List<uint>> itemIdsByName =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Structured SpecialShop dependency graph.  Keeping this relationship in
+    // data form lets CQG explain not only where the target is exchanged, but
+    // also where the required token/currency comes from.
+    private readonly Dictionary<uint, List<ExchangeDependency>> exchangeDependencies = [];
+
     public SourceResolver(
         IDataManager data,
         SupplementalCsvIndex supplemental,
@@ -110,6 +122,7 @@ public sealed class SourceResolver
         }
 
         BuildContentFinderIndex();
+        BuildRetailShopNpcIndex();
 
         // Strongly typed providers. Each one reads a specific game relation
         // backwards: "which items can this row produce / sell / reward?"
@@ -200,7 +213,7 @@ public sealed class SourceResolver
             foreach (var dutyRef in dutyRefs)
             {
                 foreach (var duty in ResolveDutyReference(dutyRef))
-                    sources.Add(DutySource(duty));
+                    sources.Add(DutySource(duty, "Supplemental duty association"));
             }
         }
 
@@ -291,6 +304,8 @@ public sealed class SourceResolver
                 Priority: 80));
         }
 
+        AddExchangeDependencySources(target.ItemId, sources);
+        SuppressAmbiguousSupplementalDuties(sources);
         SuppressGenericSourcesWhenSpecificAlternativeExists(sources);
 
         var deduped = sources
@@ -298,11 +313,11 @@ public sealed class SourceResolver
                 s => $"{s.Kind}|{s.Name}|{s.Detail}",
                 StringComparer.OrdinalIgnoreCase)
             .Select(g => g
-                .OrderByDescending(x => x.IsUnlocked == true)
-                .ThenBy(x => x.Priority)
+                .OrderBy(x => x.Priority)
+                .ThenByDescending(x => x.IsUnlocked == true)
                 .First())
-            .OrderByDescending(x => x.IsUnlocked == true)
-            .ThenBy(x => x.Priority)
+            .OrderBy(x => x.Priority)
+            .ThenByDescending(x => x.IsUnlocked == true)
             .ThenBy(x => x.Kind, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -412,9 +427,10 @@ public sealed class SourceResolver
                         {
                             Add(itemId, new SourceEntry(
                                 "Vendor",
-                                $"Vendor: {npc}",
+                                $"Vendor: {npc.Name}",
                                 detail,
-                                Priority: 35));
+                                Priority: 35,
+                                NpcId: npc.Id));
                         }
                     }
                     else
@@ -460,8 +476,12 @@ public sealed class SourceResolver
                     shopName = string.Empty;
                 }
 
-                if (string.IsNullOrWhiteSpace(shopName))
-                    shopName = supplemental.GetShopName(shop.RowId) ?? string.Empty;
+                var supplementalShopName = supplemental.GetShopName(shop.RowId);
+                if (string.IsNullOrWhiteSpace(shopName) ||
+                    (ContainsCjk(shopName) && !string.IsNullOrWhiteSpace(supplementalShopName) && !ContainsCjk(supplementalShopName!)))
+                {
+                    shopName = supplementalShopName ?? string.Empty;
+                }
 
                 var npcNames = ResolveShopNpcNames(shop.RowId);
 
@@ -496,6 +516,7 @@ public sealed class SourceResolver
                             continue;
 
                         var costs = new List<string>();
+                        var structuredCosts = new List<(uint ItemId, uint Amount)>();
 
                         try
                         {
@@ -504,10 +525,35 @@ public sealed class SourceResolver
                                 var currencyId = cost.ItemCost.RowId;
                                 var amount = cost.CurrencyCost;
 
-                                if (currencyId == 0 || amount == 0)
+                                if (amount == 0)
+                                    continue;
+
+                                // SpecialShop uses row-id 1 as a sentinel for a number
+                                // of non-item currencies. Treating that as Item#1 (Gil)
+                                // produces confidently wrong guidance such as "600 gil"
+                                // for Poetics gear. Prefer a currency name recoverable
+                                // from the shop identity and only create a dependency if
+                                // that currency is represented by a real Item row.
+                                if (currencyId == 1)
+                                {
+                                    if (TryInferSpecialShopCurrency(shopName, out var inferredCurrency))
+                                    {
+                                        costs.Add($"{amount:N0} {inferredCurrency}");
+                                        if (itemIdsByName.TryGetValue(inferredCurrency, out var inferredIds) && inferredIds.Count > 0)
+                                            structuredCosts.Add((inferredIds[0], amount));
+                                    }
+
+                                    // SpecialShop row 1 is a currency sentinel, not
+                                    // literal Item#1/Gil. If the currency cannot be
+                                    // named safely, omit the price instead of lying.
+                                    continue;
+                                }
+
+                                if (currencyId == 0)
                                     continue;
 
                                 costs.Add(FormatCost(currencyId, amount));
+                                structuredCosts.Add((currencyId, amount));
                             }
                         }
                         catch (Exception ex)
@@ -550,14 +596,15 @@ public sealed class SourceResolver
                                 foreach (var npc in npcNames)
                                 {
                                     var displayName = string.IsNullOrWhiteSpace(shopName)
-                                        ? $"Vendor: {npc}"
-                                        : $"Special / Currency Shop: {shopName} — {npc}";
+                                        ? $"Vendor: {npc.Name}"
+                                        : $"Special / Currency Shop: {shopName} — {npc.Name}";
 
                                     Add(reward.ItemId, new SourceEntry(
                                         sourceKind,
                                         displayName,
                                         detail,
-                                        Priority: 32));
+                                        Priority: 32,
+                                        NpcId: npc.Id));
                                 }
                             }
                             else
@@ -571,6 +618,16 @@ public sealed class SourceResolver
                                     displayName,
                                     detail,
                                     Priority: 35));
+                            }
+
+                            foreach (var structuredCost in structuredCosts)
+                            {
+                                AddExchangeDependency(
+                                    reward.ItemId,
+                                    structuredCost.ItemId,
+                                    structuredCost.Amount,
+                                    shopName,
+                                    npcNames.Select(x => x.Name).ToArray());
                             }
 
                             resolvedItems.Add(reward.ItemId);
@@ -592,6 +649,64 @@ public sealed class SourceResolver
 
         SpecialShopSourceItems = resolvedItems.Count;
         log.Information($"CQG SpecialShop indexed {SpecialShopSourceItems:N0} distinct item rewards.");
+    }
+
+    private static bool TryInferSpecialShopCurrency(string shopName, out string currencyName)
+    {
+        currencyName = string.Empty;
+        if (string.IsNullOrWhiteSpace(shopName))
+            return false;
+
+        var known = new[]
+        {
+            "Allagan Tomestone of Poetics",
+            "Allagan Tomestone of Mathematics",
+            "Allagan Tomestone of Heliometry",
+            "Wolf Mark",
+            "Trophy Crystal",
+            "Manderville Gold Saucer Point",
+            "MGP",
+            "Allied Seal",
+            "Centurio Seal",
+            "Sack of Nuts",
+            "Bicolor Gemstone",
+            "Skybuilders' Scrip",
+            "White Crafters' Scrip",
+            "Purple Crafters' Scrip",
+            "White Gatherers' Scrip",
+            "Purple Gatherers' Scrip",
+        };
+
+        foreach (var candidate in known)
+        {
+            if (!shopName.Contains(candidate, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            currencyName = candidate.Equals("MGP", StringComparison.OrdinalIgnoreCase)
+                ? "MGP"
+                : candidate;
+            return true;
+        }
+
+        // Historical tomestone shop names often use "Allagan Tomestones of X"
+        // while the currency item is singular. Recover that form generically.
+        var pluralMarker = "Allagan Tomestones of ";
+        var pluralIndex = shopName.IndexOf(pluralMarker, StringComparison.OrdinalIgnoreCase);
+        if (pluralIndex >= 0)
+        {
+            var tail = shopName[(pluralIndex + pluralMarker.Length)..];
+            var stop = tail.IndexOfAny(['(', '—', '-', '|']);
+            if (stop > 0)
+                tail = tail[..stop];
+            tail = tail.Trim();
+            if (!string.IsNullOrWhiteSpace(tail))
+            {
+                currencyName = $"Allagan Tomestone of {tail}";
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string ClassifySpecialShopKind(string shopName, string? detail)
@@ -630,6 +745,13 @@ public sealed class SourceResolver
 
     private static bool ContainsAny(string text, params string[] values) =>
         values.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase));
+
+    private static bool ContainsCjk(string text) =>
+        text.Any(ch =>
+            (ch >= '\u3040' && ch <= '\u30ff') ||
+            (ch >= '\u3400' && ch <= '\u4dbf') ||
+            (ch >= '\u4e00' && ch <= '\u9fff') ||
+            (ch >= '\uac00' && ch <= '\ud7af'));
 
     /// <summary>
     /// Targeted v0.43 source semantics derived from coherent families in the
@@ -775,12 +897,26 @@ public sealed class SourceResolver
         // content system encoded directly in the token/currency name.
         if (name.StartsWith("Allagan Tomestone of ", StringComparison.OrdinalIgnoreCase))
         {
+            var detail = name.Equals("Allagan Tomestone of Poetics", StringComparison.OrdinalIgnoreCase)
+                ? "Earned repeatedly from eligible duties, roulettes, hunts, and other level-capped content. Use repeatable activities rather than one-time quest rewards when farming a required amount."
+                : "Earned from the eligible endgame duties, roulettes, hunts, and other reward systems for its patch/expansion. Availability changes as tomestones rotate into or out of circulation.";
+
             return new SourceEntry(
                 "Tomestones",
                 "Allagan Tomestone progression",
-                "Expansion endgame tomestone currency; exact historical earning activities vary by patch.",
-                Priority: 90,
-                SpecificityHint: "Named");
+                detail,
+                Priority: 5,
+                SpecificityHint: "Named repeatable currency source");
+        }
+
+        if (name.Equals("Silver Chocobo Feather", StringComparison.OrdinalIgnoreCase))
+        {
+            return new SourceEntry(
+                "World Population Incentive",
+                "Preferred+ World character-creation bonus",
+                "Eligible newly created characters on Preferred+ Worlds receive 10 Silver Chocobo Feathers on first login. Exchange them with Calamity Salvagers for leveling gear.",
+                Priority: 35,
+                SpecificityHint: "Named conditional acquisition source");
         }
 
         if (ContainsAny(name,
@@ -1688,6 +1824,76 @@ public sealed class SourceResolver
                 continue;
 
             SourceEntry? source = null;
+
+            // Exact exchange-token acquisition routes that are not reliably
+            // exposed by the retail reverse sheets. These are terminal, named
+            // activities rather than vague system labels.
+            if (name.Equals("Clouddark Demimateria I", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Clouddark Demimateria II", StringComparison.OrdinalIgnoreCase))
+            {
+                AddFallback(itemId, new SourceEntry(
+                    "Duty",
+                    "The Cloud of Darkness (Chaotic)",
+                    "Chaotic alliance raid reward.",
+                    Priority: 35,
+                    SpecificityHint: "Named"));
+                continue;
+            }
+
+            if (name.StartsWith("AAC Illustrated: CW Edition ", StringComparison.OrdinalIgnoreCase))
+            {
+                var suffix = name["AAC Illustrated: CW Edition ".Length..].Trim();
+                var duty = suffix switch
+                {
+                    "I" => "AAC Cruiserweight M1 (Savage)",
+                    "II" => "AAC Cruiserweight M2 (Savage)",
+                    "III" => "AAC Cruiserweight M3 (Savage)",
+                    "IV" => "AAC Cruiserweight M4 (Savage)",
+                    _ => string.Empty,
+                };
+                if (!string.IsNullOrWhiteSpace(duty))
+                {
+                    AddFallback(itemId, new SourceEntry(
+                        "Duty", duty, "Savage raid token.", Priority: 35, SpecificityHint: "Named"));
+                    continue;
+                }
+            }
+
+            if (name.Equals("Gelmorran Potsherd", StringComparison.OrdinalIgnoreCase))
+            {
+                AddFallback(itemId, new SourceEntry(
+                    "Deep Dungeon", "The Palace of the Dead",
+                    "Obtained while progressing through the Palace of the Dead.",
+                    Priority: 45, SpecificityHint: "Named"));
+                continue;
+            }
+
+            if (name.Equals("Rathalos Scale", StringComparison.OrdinalIgnoreCase))
+            {
+                AddFallback(itemId, new SourceEntry(
+                    "Trial", "The Great Hunt", "Rathalos material reward.",
+                    Priority: 35, SpecificityHint: "Named"));
+                AddFallback(itemId, new SourceEntry(
+                    "Trial", "The Great Hunt (Extreme)", "Rathalos material reward.",
+                    Priority: 35, SpecificityHint: "Named"));
+                continue;
+            }
+
+            if (name.Equals("Rathalos Scale+", StringComparison.OrdinalIgnoreCase))
+            {
+                AddFallback(itemId, new SourceEntry(
+                    "Trial", "The Great Hunt (Extreme)", "Rare Rathalos material reward.",
+                    Priority: 35, SpecificityHint: "Named"));
+                continue;
+            }
+
+            if (name.Equals("Rokkon Potsherd", StringComparison.OrdinalIgnoreCase))
+            {
+                AddFallback(itemId, new SourceEntry(
+                    "Variant Dungeon", "Mount Rokkon", "Variant dungeon reward.",
+                    Priority: 40, SpecificityHint: "Named"));
+                continue;
+            }
 
             // Several relic/event weapon stages use unique names with no
             // textual stage marker. Their Item IDs are contiguous families in
@@ -2917,6 +3123,63 @@ public sealed class SourceResolver
         return collectibleSources.HasSource(target.ItemId);
     }
 
+    private static bool IsIncompleteShopSource(SourceEntry source)
+    {
+        var looksLikeShop = source.Kind.Contains("Vendor", StringComparison.OrdinalIgnoreCase) ||
+                            source.Kind.Contains("Shop", StringComparison.OrdinalIgnoreCase) ||
+                            source.Name.Contains("Special / Currency Shop", StringComparison.OrdinalIgnoreCase);
+        if (!looksLikeShop)
+            return false;
+
+        var name = source.Name.Trim();
+
+        // Ordinary named vendor forms already identify the contact directly.
+        if ((name.StartsWith("Vendor: ", StringComparison.OrdinalIgnoreCase) ||
+             name.StartsWith("Gil Vendor: ", StringComparison.OrdinalIgnoreCase) ||
+             name.StartsWith("Grand Company Quartermaster: ", StringComparison.OrdinalIgnoreCase) ||
+             name.StartsWith("Triple Triad NPC: ", StringComparison.OrdinalIgnoreCase) ||
+             name.StartsWith("NPC: ", StringComparison.OrdinalIgnoreCase)) &&
+            name[(name.IndexOf(':') + 1)..].Trim().Length > 0)
+        {
+            return false;
+        }
+
+        // SpecialShop / trade-shop forms encode the contact after the final em
+        // dash. Without that contact CQG still cannot answer the practical
+        // "where do I go?" question.
+        return !name.Contains(" — ", StringComparison.Ordinal);
+    }
+
+    private static bool IsUnresolvedDutyPlaceholder(SourceEntry source)
+    {
+        if (!IsDutyLike(source))
+            return false;
+
+        var name = source.Name.Trim();
+        return name.Equals("Duty", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Dungeon", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Trial", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Raid", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Duty Chest", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Duty Boss", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Duty Boss Chest", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("Duty / Instance Drop", StringComparison.OrdinalIgnoreCase) ||
+               (source.Detail?.Contains("exact duty unresolved", StringComparison.OrdinalIgnoreCase) ?? false) ||
+               (source.Detail?.Contains("conflict", StringComparison.OrdinalIgnoreCase) ?? false);
+    }
+
+    private static bool IsActionableItemSpecificSource(SourceEntry source)
+    {
+        if (IsGenericSourceEntry(source) ||
+            IsIncompleteShopSource(source) ||
+            IsUnresolvedDutyPlaceholder(source))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Returns true when Garland can still materially improve the acquisition
     /// description. This is deliberately broader than "unresolved": named live,
@@ -2938,12 +3201,52 @@ public sealed class SourceResolver
         // reason to ask it for the same item again simply because a weaker live
         // provider also exposes a generic route.
         var existingGarland = garlandSources.GetSources(target.ItemId);
-        if (existingGarland.Any(source => !IsGenericSourceEntry(source)))
+        if (existingGarland.Any(IsActionableItemSpecificSource))
             return false;
 
         var providerSources = GetNonGarlandProviderSources(target);
 
-        if (providerSources.Any(source => !IsGenericSourceEntry(source)))
+        // A named exchange that does not identify an NPC/location is still
+        // incomplete guidance.  Garland often has the missing trade-shop NPC.
+        if (providerSources.Any(IsIncompleteShopSource))
+            return true;
+
+        // Inferred supplemental duty associations are only authoritative when
+        // they agree.  A direct supplemental item->CFC relation is intentionally
+        // excluded from this count and can resolve the ambiguity locally.
+        var supplementalDutyCount = providerSources
+            .Where(source => string.Equals(
+                source.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase))
+            .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+
+        var hasAuthoritativeLocalDuty = providerSources.Any(source =>
+            string.Equals(
+                source.SpecificityHint,
+                "Supplemental exact duty relation",
+                StringComparison.OrdinalIgnoreCase));
+
+        if (supplementalDutyCount > 1 && !hasAuthoritativeLocalDuty)
+            return true;
+
+        // Broad inferred associations should not independently satisfy this
+        // quality check when they conflict.  All other actionable item-specific
+        // sources, including explicit supplemental duty rows, can.
+        if (providerSources.Any(source =>
+                !string.Equals(
+                    source.SpecificityHint,
+                    "Supplemental duty association",
+                    StringComparison.OrdinalIgnoreCase) &&
+                IsActionableItemSpecificSource(source)))
+        {
+            return false;
+        }
+
+        if (supplementalDutyCount == 1)
             return false;
 
         // No named provider source, or only generic provider sources: Garland
@@ -2958,10 +3261,12 @@ public sealed class SourceResolver
     /// provider-agnostic quality metric: it includes system/curated/guide-level
     /// entries even when Garland has already been checked and has nothing more.
     /// </summary>
-    public bool NeedsSpecificityEnrichment(TargetEntry target) =>
-        !GetSourceSpecificity(target).StartsWith(
-            "Named ",
-            StringComparison.OrdinalIgnoreCase);
+    public bool NeedsSpecificityEnrichment(TargetEntry target)
+    {
+        var specificity = GetSourceSpecificity(target);
+        return !specificity.StartsWith("Named ", StringComparison.OrdinalIgnoreCase) ||
+               specificity.StartsWith("Named incomplete", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Stronger quality predicate than the named-source backlog. Named
@@ -2970,10 +3275,26 @@ public sealed class SourceResolver
     /// This metric keeps the long-term "make everything exact where possible"
     /// goal visible while the named-source backlog measures everyday usability.
     /// </summary>
-    public bool NeedsExactItemSpecificity(TargetEntry target) =>
-        !GetSourceSpecificity(target).Equals(
+    public bool NeedsExactItemSpecificity(TargetEntry target)
+    {
+        var special = SpecialAcquisitionCatalog.TryGetSource(target.Name);
+        if (special is not null &&
+            !special.Kind.Equals("Future / Unknown Availability", StringComparison.OrdinalIgnoreCase) &&
+            IsNamedSystemSpecificSource(special))
+        {
+            return false;
+        }
+
+        if (curatedFallbackSources.TryGetValue(target.ItemId, out var curated) &&
+            curated.Any(IsNamedSystemSpecificSource))
+        {
+            return false;
+        }
+
+        return !GetSourceSpecificity(target).Equals(
             "Named item-specific",
             StringComparison.OrdinalIgnoreCase);
+    }
 
     private IReadOnlyList<SourceEntry> GetNonGarlandProviderSources(TargetEntry target)
     {
@@ -2991,7 +3312,7 @@ public sealed class SourceResolver
             foreach (var dutyRef in dutyRefs)
             {
                 foreach (var duty in ResolveDutyReference(dutyRef))
-                    result.Add(DutySource(duty));
+                    result.Add(DutySource(duty, "Supplemental duty association"));
             }
         }
 
@@ -3018,6 +3339,9 @@ public sealed class SourceResolver
         var name = source.Name.Trim();
 
         if (source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (IsUnresolvedDutyPlaceholder(source))
             return true;
 
         if (name.StartsWith("Vendor: ", StringComparison.OrdinalIgnoreCase) ||
@@ -3088,11 +3412,363 @@ public sealed class SourceResolver
                name.Equals("Item conversion / supplemental source", StringComparison.OrdinalIgnoreCase);
     }
 
+    private void AddExchangeDependency(
+        uint rewardItemId,
+        uint costItemId,
+        uint amount,
+        string shopName,
+        IReadOnlyList<string> npcNames)
+    {
+        if (rewardItemId == 0 || costItemId == 0 || rewardItemId == costItemId)
+            return;
+
+        if (!exchangeDependencies.TryGetValue(rewardItemId, out var list))
+        {
+            list = [];
+            exchangeDependencies[rewardItemId] = list;
+        }
+
+        if (list.Any(x => x.CostItemId == costItemId && x.Amount == amount))
+            return;
+
+        list.Add(new ExchangeDependency(
+            costItemId,
+            amount,
+            shopName,
+            npcNames.ToArray()));
+    }
+
+    /// <summary>
+    /// Adds the most useful known acquisition route for a token/currency used
+    /// by a SpecialShop exchange.  This turns "8 Midan Manifesto - Page 4"
+    /// into actionable guidance such as the raid that awards that manifesto.
+    /// The dependency source is intentionally lower-priority than the direct
+    /// shop itself, so CQG still says how the target is actually obtained.
+    /// </summary>
+    public IReadOnlyList<ExchangeDependencyInfo> GetExchangeDependencies(uint targetItemId)
+    {
+        if (!exchangeDependencies.TryGetValue(targetItemId, out var dependencies))
+            return Array.Empty<ExchangeDependencyInfo>();
+
+        return dependencies
+            .Select(x => new ExchangeDependencyInfo(
+                x.CostItemId,
+                ItemName(x.CostItemId) ?? $"item {x.CostItemId}",
+                x.Amount,
+                x.ShopName,
+                x.NpcNames))
+            .ToArray();
+    }
+
+    public IReadOnlyList<string> GetSupplementalDutyCandidateNames(uint itemId)
+    {
+        if (!supplemental.DutyReferencesByItem.TryGetValue(itemId, out var dutyRefs))
+            return Array.Empty<string>();
+
+        return dutyRefs
+            .SelectMany(ResolveDutyReference)
+            .Select(x => x.Name)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public IReadOnlyList<SourceEntry> GetKnownSourcesForItemId(uint itemId)
+    {
+        var candidateSources = new List<SourceEntry>();
+
+        if (gameSources.TryGetValue(itemId, out var game))
+            candidateSources.AddRange(game);
+
+        candidateSources.AddRange(collectibleSources.GetSources(itemId));
+
+        if (supplemental.DutyReferencesByItem.TryGetValue(itemId, out var dutyRefs))
+        {
+            foreach (var dutyRef in dutyRefs)
+            {
+                foreach (var duty in ResolveDutyReference(dutyRef))
+                    candidateSources.Add(DutySource(duty, "Supplemental duty association"));
+            }
+        }
+
+        if (supplemental.ItemSources.TryGetValue(itemId, out var supplementalRows))
+        {
+            foreach (var row in supplementalRows)
+            {
+                var resolved = ResolveSupplemental(row);
+                if (resolved is not null)
+                    candidateSources.Add(resolved);
+            }
+        }
+
+        candidateSources.AddRange(garlandSources.GetSources(itemId));
+
+        var synthetic = TryTargetForMetrics(itemId);
+        if (synthetic is not null)
+        {
+            var broad = GetBroadSystemSource(synthetic);
+            if (broad is not null)
+                candidateSources.Add(broad);
+
+            if (!HasNonCuratedSource(itemId) &&
+                broad is null &&
+                curatedFallbackSources.TryGetValue(itemId, out var curated))
+            {
+                candidateSources.AddRange(curated);
+            }
+        }
+
+        SuppressAmbiguousSupplementalDuties(candidateSources);
+        SuppressGenericSourcesWhenSpecificAlternativeExists(candidateSources);
+
+        return candidateSources
+            .GroupBy(s => $"{s.Kind}|{s.Name}|{s.Detail}", StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderBy(x => x.Priority).First())
+            .OrderBy(x => x.Priority)
+            .ThenBy(x => x.Kind, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public bool HasKnownActionableSourceForItemId(uint itemId) =>
+        GetKnownSourcesForItemId(itemId).Any(IsActionableItemSpecificSource);
+
+    private static bool IsAllaganTomestoneName(string name) =>
+        !string.IsNullOrWhiteSpace(name) &&
+        name.StartsWith("Allagan Tomestone of ", StringComparison.OrdinalIgnoreCase);
+
+    private void AddExchangeDependencySources(uint targetItemId, List<SourceEntry> sources)
+    {
+        AddExchangeDependencySourcesRecursive(
+            targetItemId,
+            sources,
+            new HashSet<uint> { targetItemId },
+            depth: 0);
+    }
+
+    private void AddExchangeDependencySourcesRecursive(
+        uint targetItemId,
+        List<SourceEntry> sources,
+        HashSet<uint> visited,
+        int depth)
+    {
+        if (depth > 2 || !exchangeDependencies.TryGetValue(targetItemId, out var dependencies))
+            return;
+
+        foreach (var dependency in dependencies)
+        {
+            var costName = ItemName(dependency.CostItemId) ?? $"item {dependency.CostItemId}";
+            if (costName.Equals("Gil", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!visited.Add(dependency.CostItemId))
+                continue;
+
+            var candidateSources = GetKnownSourcesForItemId(dependency.CostItemId);
+
+            // Tomestones are farmable currencies. A quest that happens to award
+            // a few tomestones is technically a source, but it is poor guidance
+            // for an exchange that requires hundreds or thousands. Prefer the
+            // repeatable tomestone-system route and suppress incidental quest /
+            // conversion rewards from the dependency summary.
+            if (IsAllaganTomestoneName(costName))
+            {
+                candidateSources = candidateSources
+                    .Where(x => x.Kind.Equals("Tomestones", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+
+                if (candidateSources.Count == 0)
+                {
+                    candidateSources = new[]
+                    {
+                        new SourceEntry(
+                            "Tomestones",
+                            "Allagan Tomestone progression",
+                            costName.Equals("Allagan Tomestone of Poetics", StringComparison.OrdinalIgnoreCase)
+                                ? "Earn repeatedly from eligible duties, roulettes, hunts, and other level-capped content."
+                                : "Earn from the eligible endgame reward activities for this tomestone's patch/expansion.",
+                            Priority: 30,
+                            SpecificityHint: "Named repeatable currency source")
+                    };
+                }
+            }
+
+            var actionable = candidateSources
+                .Where(IsActionableItemSpecificSource)
+                .ToArray();
+
+            var detail = depth == 0
+                ? $"Source for {dependency.Amount:N0} {costName}"
+                : $"Dependency source for {dependency.Amount:N0} {costName}";
+
+            // A token can legitimately come from several duties (for example
+            // normal-raid books/armor tokens). Those are alternatives, not
+            // ambiguity. Keep every equally actionable duty instead of silently
+            // collapsing the answer to whichever duty sorts first.
+            var dutyOptions = actionable
+                .Where(IsDutyLike)
+                .GroupBy(x => DutyUnlockGuidanceIndex.ExtractDutyName(x) ?? x.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(x => x.OrderBy(y => y.Priority).First())
+                .ToArray();
+
+            if (dutyOptions.Length > 0)
+            {
+                foreach (var duty in dutyOptions)
+                {
+                    sources.Add(duty with
+                    {
+                        Detail = detail,
+                        Priority = Math.Max(duty.Priority, 40 + depth * 5),
+                        SpecificityHint = "Exchange dependency",
+                    });
+                }
+            }
+            else
+            {
+                var best = actionable
+                    .OrderBy(x => x.Priority)
+                    .FirstOrDefault()
+                    ?? candidateSources
+                        .Where(x => !IsGenericSourceEntry(x))
+                        .OrderBy(x => x.Priority)
+                        .FirstOrDefault();
+
+                if (best is not null)
+                {
+                    sources.Add(new SourceEntry(
+                        "Currency Source",
+                        best.Name,
+                        detail + (string.IsNullOrWhiteSpace(best.Detail) ? string.Empty : $" — {best.Detail}"),
+                        Priority: 50 + depth * 5,
+                        SpecificityHint: "Exchange dependency"));
+                }
+            }
+
+            // Follow an exchange token through at most two additional exchange
+            // layers. This resolves token -> token -> duty/vendor chains while
+            // preventing cycles or giant dependency trees.
+            AddExchangeDependencySourcesRecursive(
+                dependency.CostItemId,
+                sources,
+                visited,
+                depth + 1);
+        }
+    }
+
+    /// <summary>
+    /// Supplemental chest/territory joins are useful but can associate one
+    /// item with several unrelated duties.  Never present one of those as the
+    /// authoritative answer.  If Garland has an item-specific duty relation,
+    /// retain only supplemental entries that agree with it.  Otherwise replace
+    /// a conflicting group with a truthful generic duty placeholder while the
+    /// target-scoped enrichment request resolves the exact source.
+    /// </summary>
+    private static void SuppressAmbiguousSupplementalDuties(List<SourceEntry> sources)
+    {
+        // Strong item-specific authority can come from Garland or from a
+        // supplemental row that explicitly names ContentFinderCondition.
+        // Joined chest/territory associations are weaker and must never be
+        // allowed to overrule an explicit item -> duty relation.
+        var authoritativeDuties = sources
+            .Where(x =>
+                x.Detail?.Contains("Garland Tools", StringComparison.OrdinalIgnoreCase) == true ||
+                string.Equals(
+                    x.SpecificityHint,
+                    "Supplemental exact duty relation",
+                    StringComparison.OrdinalIgnoreCase))
+            .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Cast<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var supplementalAssociations = sources
+            .Where(x => string.Equals(
+                x.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        if (supplementalAssociations.Length == 0)
+            return;
+
+        if (authoritativeDuties.Count > 0)
+        {
+            // Keep every direct/authoritative duty source.  Remove only weaker
+            // inferred associations that disagree with all authoritative names.
+            // This allows items with several genuinely valid direct duty sources
+            // to show all of those routes without inventing ambiguity.
+            sources.RemoveAll(source =>
+            {
+                if (!string.Equals(
+                        source.SpecificityHint,
+                        "Supplemental duty association",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                var name = DutyUnlockGuidanceIndex.ExtractDutyName(source);
+                return string.IsNullOrWhiteSpace(name) ||
+                       !authoritativeDuties.Contains(name);
+            });
+            return;
+        }
+
+        var distinctSupplementalDuties = supplementalAssociations
+            .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+
+        if (distinctSupplementalDuties <= 1)
+            return;
+
+        // No direct evidence exists and the inferred associations disagree.
+        // Do not choose one.  Replace the conflicting group with an explicit
+        // incomplete placeholder so target-scoped enrichment can continue.
+        sources.RemoveAll(source =>
+            string.Equals(
+                source.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase));
+
+        sources.Add(new SourceEntry(
+            "Duty",
+            "Duty / Instance Drop",
+            "Multiple inferred duty associations conflict; exact duty still unresolved.",
+            Priority: 85));
+    }
+
+    private static bool IsDutyLike(SourceEntry source) =>
+        source.Kind.Equals("Activity", StringComparison.OrdinalIgnoreCase) ||
+        source.Kind.Equals("Duty", StringComparison.OrdinalIgnoreCase) ||
+        source.Kind.Contains("Raid", StringComparison.OrdinalIgnoreCase) ||
+        source.Kind.Contains("Trial", StringComparison.OrdinalIgnoreCase) ||
+        source.Kind.Contains("Dungeon", StringComparison.OrdinalIgnoreCase);
+
     private static void SuppressGenericSourcesWhenSpecificAlternativeExists(
         List<SourceEntry> sources)
     {
         if (sources.Count < 2)
             return;
+
+        // Duty placeholders and concrete duties can use different Kind values
+        // (for example Duty vs Activity).  Once a concrete duty is known, a
+        // generic "Duty Chest" / "Duty / Instance Drop" line adds no useful
+        // information and must not remain beside the exact answer.
+        var hasConcreteDuty = sources.Any(source =>
+            IsDutyLike(source) &&
+            !IsUnresolvedDutyPlaceholder(source) &&
+            !string.Equals(
+                source.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase));
+
+        if (hasConcreteDuty)
+        {
+            sources.RemoveAll(IsUnresolvedDutyPlaceholder);
+        }
 
         var specificKinds = sources
             .Where(source => !IsGenericSourceEntry(source))
@@ -3875,8 +4551,13 @@ public sealed class SourceResolver
             var cfcId = SupplementalCsvIndex.FirstIdContaining(
                 row, "ContentFinderCondition", "Cfc");
 
+            // An explicit ContentFinderCondition on the item-source row is a
+            // direct item -> duty relationship.  This is materially stronger
+            // than a duty inferred by joining a generic chest/boss parent row,
+            // so preserve that provenance instead of mixing it into the broad
+            // supplemental-association bucket.
             if (cfcId != 0 && cfcById.TryGetValue(cfcId, out var direct))
-                return DutySource(direct);
+                return DutySource(direct, "Supplemental exact duty relation");
 
             var territoryId = SupplementalCsvIndex.FirstIdContaining(
                 row, "TerritoryType", "Territory");
@@ -3890,7 +4571,7 @@ public sealed class SourceResolver
                     .ToArray();
 
                 if (unique.Length == 1)
-                    return DutySource(unique[0]);
+                    return DutySource(unique[0], "Supplemental duty association");
             }
 
             // Do not invent a duty name from an ambiguous territory mapping.
@@ -3981,7 +4662,7 @@ public sealed class SourceResolver
         return new SourceEntry(record.Kind, record.Kind, Priority: 90);
     }
 
-    private SourceEntry DutySource(ContentFinderInfo duty)
+    private SourceEntry DutySource(ContentFinderInfo duty, string? specificityHint = null)
     {
         var unlocked = IsContentUnlocked(duty.InstanceContentId);
 
@@ -3989,7 +4670,8 @@ public sealed class SourceResolver
             "Activity",
             duty.Name,
             IsUnlocked: unlocked,
-            Priority: unlocked == true ? 10 : 15);
+            Priority: unlocked == true ? 10 : 15,
+            SpecificityHint: specificityHint);
     }
 
     // ---------------------------------------------------------------------
@@ -4088,33 +4770,60 @@ public sealed class SourceResolver
 
     public string GetResolutionTier(TargetEntry target)
     {
-        if (gameSources.TryGetValue(target.ItemId, out var game) && game.Count > 0)
-            return "Live/Game-sheet";
+        // Keep provenance classification lightweight. This method is used by
+        // diagnostics that may iterate the entire catalog, so it must never call
+        // Resolve(target): Resolve can follow exchange dependency chains and was
+        // responsible for the v1.1.12.6 full-catalog hitch when Debug was open.
+        var known = GetKnownSourcesForItemId(target.ItemId);
+        var primary = known.FirstOrDefault(source =>
+            !source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase));
 
-        if (collectibleSources.HasSource(target.ItemId))
-            return "FFXIV Collect";
+        if (primary is not null)
+        {
+            var garland = garlandSources.GetSources(target.ItemId);
+            if (garland.Contains(primary))
+                return "Garland";
 
-        if ((supplemental.DutyReferencesByItem.TryGetValue(target.ItemId, out var duties) &&
-             duties.Count > 0) ||
-            (supplemental.ItemSources.TryGetValue(target.ItemId, out var supp) &&
-             supp.Count > 0))
-            return "LuminaSupplemental";
+            var collect = collectibleSources.GetSources(target.ItemId);
+            if (collect.Contains(primary))
+                return "FFXIV Collect";
 
-        if (garlandSources.HasSource(target.ItemId))
-            return "Garland";
+            if (gameSources.TryGetValue(target.ItemId, out var game) && game.Contains(primary))
+                return "Live/Game-sheet";
 
-        if (GetBroadSystemSource(target) is not null)
-            return "Broad system";
+            if ((primary.SpecificityHint?.Equals(
+                    "Supplemental duty association",
+                    StringComparison.OrdinalIgnoreCase) == true ||
+                 primary.SpecificityHint?.Equals(
+                    "Supplemental exact duty relation",
+                    StringComparison.OrdinalIgnoreCase) == true) ||
+                (supplemental.ItemSources.TryGetValue(target.ItemId, out var supplementalRows) &&
+                 supplementalRows.Select(ResolveSupplemental).Any(source => source is not null && source.Equals(primary))))
+            {
+                return "LuminaSupplemental";
+            }
 
-        if (curatedFallbackSources.TryGetValue(target.ItemId, out var fallback) &&
-            fallback.Count > 0)
-            return "Curated fallback";
+            var broad = GetBroadSystemSource(target);
+            if (broad is not null && broad.Equals(primary))
+                return "Broad system";
 
-        // A curated prerequisite guide is itself an actionable acquisition route.
-        // HasDirectSource() has always treated it that way; keep the audit tier in
-        // sync so a zero-unresolved UI cannot export phantom unresolved rows.
+            if (curatedFallbackSources.TryGetValue(target.ItemId, out var fallback) &&
+                fallback.Any(source => source.Equals(primary)))
+            {
+                return "Curated fallback";
+            }
+        }
+
         if (CuratedGuides.ForTarget(target) is not null)
             return "Curated guide";
+
+        // Provider data may exist but be intentionally suppressed because it is
+        // ambiguous. Preserve the source family without pretending it is exact.
+        if ((supplemental.DutyReferencesByItem.TryGetValue(target.ItemId, out var duties) && duties.Count > 0) ||
+            (supplemental.ItemSources.TryGetValue(target.ItemId, out var supp) && supp.Count > 0))
+        {
+            return "LuminaSupplemental";
+        }
 
         return "Unresolved";
     }
@@ -4174,6 +4883,14 @@ public sealed class SourceResolver
         if (tier == "Broad system")
         {
             var broad = GetBroadSystemSource(target);
+            if (broad is not null &&
+                broad.Kind.Equals("Duty", StringComparison.OrdinalIgnoreCase) &&
+                !IsUnresolvedDutyPlaceholder(broad) &&
+                !string.IsNullOrWhiteSpace(DutyUnlockGuidanceIndex.ExtractDutyName(broad)))
+            {
+                return "Named item-specific";
+            }
+
             return broad is not null && IsNamedSystemSpecificSource(broad)
                 ? "Named system-specific"
                 : "System-level";
@@ -4200,8 +4917,39 @@ public sealed class SourceResolver
                 .Concat(garlandSources.GetSources(target.ItemId))
                 .ToArray();
 
-        if (providerSources.Any(source => !IsGenericSourceEntry(source)))
+        var supplementalDutyNames = providerSources
+            .Where(source => string.Equals(
+                source.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase))
+            .Select(DutyUnlockGuidanceIndex.ExtractDutyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        // Never let several conflicting inferred duty associations make the
+        // target look exact.  An explicit item->duty relation (or any other
+        // authoritative actionable source) still legitimately satisfies exact
+        // specificity.
+        var hasAuthoritativeActionableSource = providerSources.Any(source =>
+            !string.Equals(
+                source.SpecificityHint,
+                "Supplemental duty association",
+                StringComparison.OrdinalIgnoreCase) &&
+            IsActionableItemSpecificSource(source));
+
+        if (hasAuthoritativeActionableSource || supplementalDutyNames.Length == 1)
             return "Named item-specific";
+
+        if (supplementalDutyNames.Length > 1)
+            return "Named incomplete item-specific";
+
+        // A named but incomplete shop/duty relationship is still useful context,
+        // but it is not an exact actionable answer. Keep it explicitly below
+        // item-specific quality so target-scoped enrichment remains eligible.
+        if (providerSources.Any(source =>
+                IsIncompleteShopSource(source) || IsUnresolvedDutyPlaceholder(source)))
+            return "Named incomplete item-specific";
 
         // A generic live relationship (for example "Mining") can coexist with
         // a stronger metadata-driven system identity (for example Cosmic
@@ -4288,6 +5036,7 @@ public sealed class SourceResolver
             "Chocobo Racing" or
             "Hall of the Novice" or
             "Variant Dungeon" or
+            "Duty" or
             "Raid" or
             "Trial" or
             "Account Reward" or
@@ -4446,23 +5195,107 @@ public sealed class SourceResolver
         return null;
     }
 
-    private IReadOnlyList<string> ResolveShopNpcNames(uint shopId)
+    private void BuildRetailShopNpcIndex()
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var knownShopIds = new HashSet<uint>();
 
-        foreach (var npcId in supplemental.GetShopNpcIds(shopId))
+            foreach (var rows in data.GetSubrowExcelSheet<GilShopItem>())
+            {
+                if (rows.RowId != 0)
+                    knownShopIds.Add(rows.RowId);
+            }
+
+            foreach (var shop in data.GetExcelSheet<SpecialShop>())
+            {
+                if (shop.RowId != 0)
+                    knownShopIds.Add(shop.RowId);
+            }
+
+            if (knownShopIds.Count == 0)
+                return;
+
+            foreach (var npc in data.GetExcelSheet<ENpcBase>())
+            {
+                if (npc.RowId == 0)
+                    continue;
+
+                var raw = ReflectionUtil.GetPropertyValue(npc, "ENpcData", "Data");
+                if (raw is not IEnumerable values)
+                    continue;
+
+                foreach (var value in values)
+                {
+                    uint id = 0;
+
+                    try
+                    {
+                        id = ReflectionUtil.ExtractRowId(value);
+                        if (id == 0 && value is not null)
+                            id = Convert.ToUInt32(value);
+                    }
+                    catch
+                    {
+                        id = 0;
+                    }
+
+                    if (id == 0 || !knownShopIds.Contains(id))
+                        continue;
+
+                    if (!retailShopNpcIds.TryGetValue(id, out var npcs))
+                    {
+                        npcs = [];
+                        retailShopNpcIds[id] = npcs;
+                    }
+
+                    npcs.Add(npc.RowId);
+                }
+            }
+
+            log.Debug(
+                $"CQG retail shop fallback metadata: shops={retailShopNpcIds.Count:N0}, " +
+                $"links={retailShopNpcIds.Sum(x => x.Value.Count):N0}.");
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Could not build retail ENpc shop fallback index.");
+        }
+    }
+
+    private IReadOnlyList<ShopNpcRef> ResolveShopNpcNames(uint shopId)
+    {
+        var npcIds = new HashSet<uint>(supplemental.GetShopNpcIds(shopId));
+
+        // Supplemental ENpcShop is authoritative when present. Only use the
+        // retail ENpcBase reverse scan as a gap-filler for shops with no
+        // supplemental contact at all; this avoids introducing speculative
+        // NPCs from unrelated ENpcData values that happen to share an ID.
+        if (npcIds.Count == 0 && retailShopNpcIds.TryGetValue(shopId, out var retailIds))
+        {
+            foreach (var npcId in retailIds)
+                npcIds.Add(npcId);
+        }
+
+        var refs = new List<ShopNpcRef>();
+
+        foreach (var npcId in npcIds)
         {
             var name = RowName<ENpcResident>(
                 npcId,
                 "Singular",
                 "Name");
 
-            if (!string.IsNullOrWhiteSpace(name))
-                names.Add(name);
+            if (!string.IsNullOrWhiteSpace(name) &&
+                !refs.Any(x => x.Id == npcId))
+            {
+                refs.Add(new ShopNpcRef(npcId, name));
+            }
         }
 
-        return names
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+        return refs
+            .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Id)
             .ToArray();
     }
 
@@ -4480,6 +5313,14 @@ public sealed class SourceResolver
             return null;
         }
     }
+
+    private sealed record ShopNpcRef(uint Id, string Name);
+
+    private sealed record ExchangeDependency(
+        uint CostItemId,
+        uint Amount,
+        string ShopName,
+        IReadOnlyList<string> NpcNames);
 
     private sealed record ContentFinderInfo(
         uint CfcId,

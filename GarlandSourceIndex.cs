@@ -36,6 +36,7 @@ public sealed class GarlandSourceIndex : IDisposable
     };
 
     private readonly IPluginLog log;
+    private readonly NetworkRequestTracker networkRequests;
     private readonly string cachePath;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private readonly CancellationTokenSource disposeCts = new();
@@ -46,6 +47,12 @@ public sealed class GarlandSourceIndex : IDisposable
     // and curated-fallback items that Garland does not know are requested again
     // on every startup even while the cache is fresh.
     private readonly ConcurrentDictionary<uint, byte> checkedItemIds = new();
+    private readonly ConcurrentDictionary<uint, byte> inFlightItemIds = new();
+    private readonly ConcurrentDictionary<uint, DateTime> retryAfterUtc = new();
+    private readonly ConcurrentQueue<uint> targetRequestQueue = new();
+    private readonly ConcurrentDictionary<uint, byte> queuedItemIds = new();
+    private int targetQueueProcessorRunning;
+    private DateTime nextTargetRequestUtc = DateTime.MinValue;
 
     private DateTime cacheWrittenUtc = DateTime.MinValue;
 
@@ -57,12 +64,20 @@ public sealed class GarlandSourceIndex : IDisposable
     public int CompletedCount => completedCount;
 
     public int ResolvedItemCount => sources.Count;
+    public int CachedCheckedCount => checkedItemIds.Count;
+    public int CachedMissCount => Math.Max(0, checkedItemIds.Count - sources.Count);
+    public bool CacheFilePresent => File.Exists(cachePath);
+    public DateTime CacheWrittenUtc => cacheWrittenUtc;
+    public bool CacheIsFresh => cacheWrittenUtc != DateTime.MinValue &&
+                                DateTime.UtcNow - cacheWrittenUtc < CacheFreshness;
     public string Status { get; private set; } = "Not loaded";
 
-    public GarlandSourceIndex(string configDirectory, IPluginLog log)
+    public GarlandSourceIndex(string configDirectory, IPluginLog log, NetworkRequestTracker networkRequests)
     {
         this.log = log;
+        this.networkRequests = networkRequests;
         cachePath = Path.Combine(configDirectory, CacheFileName);
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomQuestGuide/1.1.13");
 
         LoadCache();
     }
@@ -78,6 +93,133 @@ public sealed class GarlandSourceIndex : IDisposable
 
     public bool HasSource(uint itemId) =>
         sources.TryGetValue(itemId, out var list) && list.Count > 0;
+
+    public bool IsChecked(uint itemId) =>
+        itemId != 0 && checkedItemIds.ContainsKey(itemId);
+
+    public bool IsCachedMiss(uint itemId) =>
+        IsChecked(itemId) && !HasSource(itemId);
+
+    /// <summary>
+    /// Requests Garland enrichment for one actively-selected item only. Cached
+    /// hits/misses are reused and transient failures are backed off. This is the
+    /// normal CQG network path; bulk RefreshAsync is retained for diagnostics but
+    /// is never called automatically by startup or /cqg.
+    /// </summary>
+    public void EnsureRequested(uint itemId)
+    {
+        if (itemId == 0)
+            return;
+
+        var cacheFresh = cacheWrittenUtc != DateTime.MinValue &&
+                         DateTime.UtcNow - cacheWrittenUtc < CacheFreshness;
+        if (cacheFresh && checkedItemIds.ContainsKey(itemId))
+        {
+            networkRequests.CacheHit("Garland item");
+            return;
+        }
+
+        if (retryAfterUtc.TryGetValue(itemId, out var retryAfter) && DateTime.UtcNow < retryAfter)
+        {
+            networkRequests.Suppressed("Garland item");
+            return;
+        }
+
+        if (inFlightItemIds.ContainsKey(itemId) || !queuedItemIds.TryAdd(itemId, 0))
+            return;
+
+        networkRequests.CacheMiss("Garland item");
+        targetRequestQueue.Enqueue(itemId);
+        StartTargetQueueProcessor();
+    }
+
+    private void StartTargetQueueProcessor()
+    {
+        if (Interlocked.CompareExchange(ref targetQueueProcessorRunning, 1, 0) != 0)
+            return;
+
+        _ = ProcessTargetQueueAsync();
+    }
+
+    private async Task ProcessTargetQueueAsync()
+    {
+        try
+        {
+            while (!disposeCts.IsCancellationRequested && targetRequestQueue.TryDequeue(out var itemId))
+            {
+                queuedItemIds.TryRemove(itemId, out _);
+
+                if (checkedItemIds.ContainsKey(itemId) && CacheIsFresh)
+                {
+                    networkRequests.CacheHit("Garland item");
+                    continue;
+                }
+
+                if (retryAfterUtc.TryGetValue(itemId, out var retryAfter) && DateTime.UtcNow < retryAfter)
+                {
+                    networkRequests.Suppressed("Garland item");
+                    continue;
+                }
+
+                var wait = nextTargetRequestUtc - DateTime.UtcNow;
+                if (wait > TimeSpan.Zero)
+                    await Task.Delay(wait, disposeCts.Token);
+
+                if (!inFlightItemIds.TryAdd(itemId, 0))
+                    continue;
+
+                nextTargetRequestUtc = DateTime.UtcNow.AddSeconds(2);
+                await ResolveOneAsync(itemId);
+            }
+        }
+        catch (OperationCanceledException) when (disposeCts.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            Interlocked.Exchange(ref targetQueueProcessorRunning, 0);
+
+            // Close the race where another target was queued after the loop
+            // observed an empty queue but before the processor flag was reset.
+            if (!targetRequestQueue.IsEmpty && !disposeCts.IsCancellationRequested)
+                StartTargetQueueProcessor();
+        }
+    }
+
+    private async Task ResolveOneAsync(uint itemId)
+    {
+        try
+        {
+            var resolved = await LoadItemAsync(itemId, disposeCts.Token);
+            if (resolved is null)
+            {
+                retryAfterUtc[itemId] = DateTime.UtcNow.AddMinutes(5);
+                return;
+            }
+
+            if (resolved.Count > 0)
+                sources[itemId] = resolved;
+            else
+                sources.TryRemove(itemId, out _);
+
+            checkedItemIds[itemId] = 0;
+            retryAfterUtc.TryRemove(itemId, out _);
+            cacheWrittenUtc = DateTime.UtcNow;
+            SaveCache();
+        }
+        catch (OperationCanceledException) when (disposeCts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            retryAfterUtc[itemId] = DateTime.UtcNow.AddMinutes(5);
+            log.Debug(ex, $"Garland lookup failed for item {itemId}.");
+        }
+        finally
+        {
+            inFlightItemIds.TryRemove(itemId, out _);
+        }
+    }
 
     public async Task RefreshAsync(IEnumerable<uint> itemIds, bool force = false)
     {
@@ -122,7 +264,7 @@ public sealed class GarlandSourceIndex : IDisposable
 
         try
         {
-            using var gate = new SemaphoreSlim(3);
+            using var gate = new SemaphoreSlim(1);
 
             var tasks = queue.Select(async itemId =>
             {
@@ -188,14 +330,19 @@ public sealed class GarlandSourceIndex : IDisposable
         var url =
             $"https://www.garlandtools.org/db/doc/item/en/3/{itemId}.json";
 
+        networkRequests.Request("Garland item");
         using var response = await http.GetAsync(url, cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
+            networkRequests.Failure("Garland item");
             // A 404 is an authoritative "Garland has no item document" miss;
             // cache it. Other HTTP failures may be transient and should retry.
+            if ((int)response.StatusCode == 429)
+                retryAfterUtc[itemId] = DateTime.UtcNow.AddMinutes(30);
             return (int)response.StatusCode == 404 ? [] : null;
         }
+        networkRequests.Success("Garland item");
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream);
@@ -254,21 +401,39 @@ public sealed class GarlandSourceIndex : IDisposable
                     .Cast<string>()
                     .ToArray();
 
-                var display = npcNames.Length > 0
-                    ? $"{shopName} — {string.Join(", ", npcNames)}"
-                    : shopName;
-
                 var detail = DescribeTradeShopCost(shop, itemId, partialNames);
 
-                AddUnique(
-                    result,
-                    new SourceEntry(
-                        "Vendor",
-                        display,
-                        string.IsNullOrWhiteSpace(detail)
-                            ? "Garland Tools trade-shop data"
-                            : detail,
-                        Priority: 56));
+                if (npcNames.Length > 0)
+                {
+                    // Emit one source per NPC. Combining multiple contacts into
+                    // one display string makes downstream location lookup treat
+                    // "NPC A, NPC B" as a single nonexistent character.
+                    foreach (var npcName in npcNames)
+                    {
+                        AddUnique(
+                            result,
+                            new SourceEntry(
+                                "Vendor",
+                                $"{shopName} — {npcName}",
+                                string.IsNullOrWhiteSpace(detail)
+                                    ? "Garland Tools trade-shop data"
+                                    : detail,
+                                Priority: 28,
+                                SpecificityHint: "Named item-specific"));
+                    }
+                }
+                else
+                {
+                    AddUnique(
+                        result,
+                        new SourceEntry(
+                            "Vendor",
+                            shopName,
+                            string.IsNullOrWhiteSpace(detail)
+                                ? "Garland Tools trade-shop data"
+                                : detail,
+                            Priority: 42));
+                }
             }
         }
         else if (HasContent(item, "tradeShops"))
@@ -942,6 +1107,34 @@ public sealed class GarlandSourceIndex : IDisposable
         return value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : value.ToString();
+    }
+
+    public bool ClearCache()
+    {
+        if (IsLoading || inFlightItemIds.Count > 0)
+            return false;
+
+        sources.Clear();
+        checkedItemIds.Clear();
+        retryAfterUtc.Clear();
+        nextTargetRequestUtc = DateTime.MinValue;
+        cacheWrittenUtc = DateTime.MinValue;
+        IsLoaded = false;
+        RequestedCount = 0;
+        completedCount = 0;
+        Status = "Not loaded";
+
+        try
+        {
+            if (File.Exists(cachePath))
+                File.Delete(cachePath);
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Could not delete CQG Garland source cache.");
+        }
+
+        return true;
     }
 
     public void Dispose()

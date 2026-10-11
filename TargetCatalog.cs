@@ -24,6 +24,7 @@ public sealed class TargetCatalog
         new(StringComparer.OrdinalIgnoreCase);
 
     private readonly List<string> jobNames = ["All"];
+    private readonly HashSet<uint> liveExchangeCostItemIds = [];
 
     public int SupplementalStoreExclusionCount { get; private set; }
     public int SupplementalUnobtainableExclusionCount { get; private set; }
@@ -49,6 +50,7 @@ public sealed class TargetCatalog
         this.supplemental = supplemental;
 
         BuildJobList();
+        BuildLiveExchangeCostItemIds();
         Build();
     }
 
@@ -103,6 +105,36 @@ public sealed class TargetCatalog
         }
     }
 
+    private void BuildLiveExchangeCostItemIds()
+    {
+        // Any real Item row currently referenced as the cost of a live
+        // SpecialShop exchange is a meaningful CQG prerequisite target, even if
+        // an availability dataset categorizes it as unobtainable/store-like.
+        // This keeps currencies such as Silver Chocobo Feathers selectable.
+        // Row IDs 0 and 1 are excluded because SpecialShop uses 1 as a
+        // non-item currency sentinel in many shops.
+        try
+        {
+            foreach (var shop in data.GetExcelSheet<SpecialShop>())
+            {
+                foreach (var trade in shop.Item)
+                {
+                    foreach (var cost in trade.ItemCosts)
+                    {
+                        var itemId = cost.ItemCost.RowId;
+                        if (itemId > 1 && cost.CurrencyCost > 0)
+                            liveExchangeCostItemIds.Add(itemId);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Catalog construction must remain resilient to sheet/schema
+            // changes; ordinary target filtering still works without this hint.
+        }
+    }
+
     private void Build()
     {
         foreach (var item in data.GetExcelSheet<Item>())
@@ -120,7 +152,8 @@ public sealed class TargetCatalog
             // items. Preserve those known families even when an availability
             // dataset currently calls the row unobtainable or store-like.
             var preserveSpecialAcquisition =
-                SpecialAcquisitionCatalog.ShouldPreserveAsTarget(name);
+                SpecialAcquisitionCatalog.ShouldPreserveAsTarget(name) ||
+                liveExchangeCostItemIds.Contains(item.RowId);
 
             if (!preserveSpecialAcquisition &&
                 supplemental.StoreItems.Contains(item.RowId))
