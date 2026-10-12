@@ -1057,7 +1057,21 @@ public sealed class TargetCatalog
                 "exterior fixture", "interior fixture", "aquarium"))
             return "Decorations & Housing";
 
-        // Collectible/unlock item categories.
+        // Collectible/unlock item categories. Name-backed rules come first for
+        // registrable unlocks whose ItemUICategory is often just "Other".
+        // Expose the thing a player conceptually wants to target instead of
+        // forcing them to know which generic item bucket contains its unlock item.
+        if (item.Name.ExtractText().Trim().StartsWith("Modern Aesthetics -", StringComparison.OrdinalIgnoreCase))
+            return "Hairstyles";
+        if (item.Name.ExtractText().Trim().StartsWith("The Faces We Wear -", StringComparison.OrdinalIgnoreCase))
+            return "Facewear";
+        if (item.Name.ExtractText().Trim().EndsWith(" Barding", StringComparison.OrdinalIgnoreCase))
+            return "Chocobo Barding";
+        if (item.Name.ExtractText().Trim().EndsWith(" Riding Map", StringComparison.OrdinalIgnoreCase))
+            return "Riding Maps";
+        if (item.Name.ExtractText().Trim().EndsWith(" Framer's Kit", StringComparison.OrdinalIgnoreCase))
+            return "Framer's Kits";
+
         if (c == "mount" || c == "mounts")
             return "Mounts";
         if (c == "minion" || c == "minions")
@@ -1068,8 +1082,6 @@ public sealed class TargetCatalog
             return "Triple Triad Cards";
         if (c.Contains("fashion accessory"))
             return "Fashion Accessories";
-        if (c.Contains("emote"))
-            return "Emotes";
 
         // Weapons and tools.
         if (ContainsAny(c,
@@ -1144,16 +1156,21 @@ public sealed class TargetCatalog
         "Minions" => 5,
         "Fashion Accessories" => 6,
         "Emotes" => 7,
-        "Orchestrion Rolls" => 8,
-        "Triple Triad Cards" => 9,
-        "Decorations & Housing" => 10,
-        "Materials" => 11,
-        "Fish" => 12,
-        "Gardening" => 13,
-        "Consumables" => 14,
-        "Materia" => 15,
-        "Dyes" => 16,
-        "Currencies & Tokens" => 17,
+        "Hairstyles" => 8,
+        "Facewear" => 9,
+        "Chocobo Barding" => 10,
+        "Riding Maps" => 11,
+        "Framer's Kits" => 12,
+        "Orchestrion Rolls" => 13,
+        "Triple Triad Cards" => 14,
+        "Decorations & Housing" => 20,
+        "Materials" => 21,
+        "Fish" => 22,
+        "Gardening" => 23,
+        "Consumables" => 24,
+        "Materia" => 25,
+        "Dyes" => 26,
+        "Currencies & Tokens" => 27,
         _ => 100,
     };
 }

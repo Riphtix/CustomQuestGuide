@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.2.2
+
+- Player-facing source ranking now hard-demotes Market Board / Player Trade whenever any actionable gameplay acquisition path is available.
+- Detailed source lists label Market Board / Player Trade as an `Alternative` when a gameplay source exists.
+- Added actionable Eureka Orthos guidance for `Modern Aesthetics - A Close Shave`: obtain Bronze-tinged Sacks from floors 1–30 and appraise them for the hairstyle.
+- Preserved internal ItemSupplement conversion relationships for Debug diagnostics only; vague conversion edges never become the preferred player source.
+
+## 1.2.1
+
+- Player-facing acquisition sources are now globally filtered to actionable guidance; vague/internal resolver relationships such as `Item conversion` remain Debug-only and no longer appear as primary or Detailed sources.
+- Fixed Riding Map ownership detection by preferring Dalamud API 15 `IUnlockState` item registration checks, with the existing lower-level ItemAction path retained as a fallback.
+- Fixed fresh-session Shared FATE snapshots by one-shot initializing the game's Fate Progress agent during an explicit `/cqg` scan when its zone data has not yet been populated; CQG immediately hides only the agent it opened and does not introduce idle polling.
+- Replaced the misleading Shared FATE unlock fallback with client-data availability diagnostics.
+- Preserved the 1.2 progress bars, fixed-width UI cleanup, Riding Map expansion sets, and all 1.1.13 resolver/cache behavior.
+
+## 1.2.0
+
+- Add first-class Emote targets searchable by display name or slash command, with local teaching-item and direct quest-reward source mapping where available.
+- Add first-class Title targets with title ownership detection and achievement-backed guidance.
+- Add dedicated target categories for Hairstyles, Fashion Accessories, Facewear, Chocobo Barding, Framer's Kits, and Riding Maps.
+- Add Riding Map collection sets by expansion plus separate field-operation map sets for Bozja/Zadnor and Occult Crescent maps.
+- Add reusable ImGui progress bars for measurable target progress while retaining exact current/required values, including pinned set, Riding Map Shared FATE, and job-progression targets.
+- Normalize primary dropdowns and progress bars to stable preferred widths so the interface no longer stretches controls unpredictably with the window; pinned action buttons now keep a consistent fixed layout.
+- Add client-backed Shared FATE progress snapshots and use them for Endwalker/Dawntrail normal-zone Riding Map Rank 2 requirements; do not incorrectly gate Shadowbringers riding maps behind Rank 2.
+- Extend unified search, pins, selection persistence, completion coloring, and one-shot ownership snapshots to Emotes and Titles.
+- Bump configuration schema to 12 for Emote/Title selection and pin support while retaining prior pins and per-character Glamour Dresser snapshots.
+- Keep Blue Mage spell targeting out of the committed 1.2 scope; dedicated limited-job support remains a future/stretch feature.
+- Preserve target-scoped network behavior and the one-shot `/cqg` ownership model; the new unlock types do not introduce continuous polling.
+
 ## 1.1.13
 
 - Show repeatable Allagan Tomestone acquisition guidance directly in prerequisite summaries, including when Detailed mode is disabled.

@@ -11,7 +11,7 @@ namespace CustomQuestGuide;
 /// </summary>
 public static class ConfigurationMigrator
 {
-    public const int CurrentVersion = 11;
+    public const int CurrentVersion = 12;
 
     private static readonly HashSet<string> ValidPinKinds = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -20,6 +20,8 @@ public static class ConfigurationMigrator
         "JobUnlock",
         "JobProgression",
         "Duty",
+        "Emote",
+        "Title",
     };
 
     public static bool Migrate(Configuration config)

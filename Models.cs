@@ -12,6 +12,30 @@ public sealed record TargetEntry(
     bool IsUntradable,
     uint FilterGroup);
 
+
+public sealed record EmoteTarget(
+    ushort EmoteId,
+    string Name,
+    string Command,
+    uint UnlockLink,
+    uint BackingItemId,
+    uint QuestId);
+
+public sealed record TitleTarget(
+    ushort TitleId,
+    string Name,
+    uint AchievementId,
+    string AchievementName,
+    string AchievementDescription);
+
+public sealed record SharedFateProgressSnapshot(
+    uint TerritoryTypeId,
+    string ZoneName,
+    byte CurrentRank,
+    byte MaxRank,
+    ushort FateProgress,
+    ushort NeededFates);
+
 public sealed record SourceEntry(
     string Kind,
     string Name,

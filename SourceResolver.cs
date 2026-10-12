@@ -187,7 +187,15 @@ public sealed class SourceResolver
             CompanyCraftSourceItems = CountKind(gameSources, "Company Workshop");
     }
 
-    public AcquisitionResult Resolve(TargetEntry target)
+    public AcquisitionResult Resolve(TargetEntry target) => ResolveInternal(target, playerFacing: true);
+
+    /// <summary>
+    /// Returns the unfiltered resolver graph for diagnostics/export only. Player-facing
+    /// UI must use Resolve(), which removes vague/internal relationship records.
+    /// </summary>
+    public AcquisitionResult ResolveDiagnostic(TargetEntry target) => ResolveInternal(target, playerFacing: false);
+
+    private AcquisitionResult ResolveInternal(TargetEntry target, bool playerFacing)
     {
         var sources = new List<SourceEntry>();
 
@@ -308,19 +316,49 @@ public sealed class SourceResolver
         SuppressAmbiguousSupplementalDuties(sources);
         SuppressGenericSourcesWhenSpecificAlternativeExists(sources);
 
-        var deduped = sources
+        IEnumerable<SourceEntry> finalSources = sources;
+        if (playerFacing)
+        {
+            // Hard UI rule: a source shown to a player must describe something
+            // they can actually do. Resolver relationships such as ItemSupplement
+            // / Item conversion remain available through ResolveDiagnostic(), but
+            // never compete for the primary source or appear in Detailed mode.
+            finalSources = finalSources
+                .Where(IsPlayerFacingActionableSource)
+                .Select(ToPlayerFacingSource);
+        }
+
+        var deduped = finalSources
             .GroupBy(
                 s => $"{s.Kind}|{s.Name}|{s.Detail}",
                 StringComparer.OrdinalIgnoreCase)
             .Select(g => g
-                .OrderBy(x => x.Priority)
+                .OrderBy(x => IsMarketSource(x) ? 1 : 0)
+                .ThenBy(x => x.Priority)
                 .ThenByDescending(x => x.IsUnlocked == true)
                 .First())
-            .OrderBy(x => x.Priority)
+            // Market Board / Player Trade is a convenience alternative, never
+            // the preferred acquisition path while any actionable in-game source
+            // exists. Keep this rule independent of provider priority numbers so
+            // a future source cannot accidentally rank the board above content.
+            .OrderBy(x => IsMarketSource(x) ? 1 : 0)
+            .ThenBy(x => x.Priority)
             .ThenByDescending(x => x.IsUnlocked == true)
             .ThenBy(x => x.Kind, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+            .ToList();
+
+        // A prerequisite guide is itself actionable. If every raw provider row
+        // was diagnostic-only, do not leave the player with a blank source panel.
+        if (playerFacing && deduped.Count == 0 && guide is not null)
+        {
+            deduped.Add(new SourceEntry(
+                "Guide",
+                guide.Name,
+                "Follow the prerequisite steps below.",
+                Priority: 75,
+                SpecificityHint: "Named"));
+        }
 
         return new AcquisitionResult(
             target,
@@ -764,6 +802,20 @@ public sealed class SourceResolver
         var id = target.ItemId;
         var name = target.Name.Trim();
         var ui = target.GameUiCategory.Trim();
+
+        // Container-backed rewards must resolve to the content that awards the
+        // container, not to the internal ItemSupplement conversion edge. This
+        // is the first concrete member of that policy and also serves as a
+        // regression target for player-facing source ranking.
+        if (name.Equals("Modern Aesthetics - A Close Shave", StringComparison.OrdinalIgnoreCase))
+        {
+            return new SourceEntry(
+                "Deep Dungeon",
+                "Eureka Orthos — Bronze-tinged Sacks (floors 1–30)",
+                "Obtain Bronze-tinged Sacks from the Accursed Hoard on floors 1–30 and have them appraised for a chance at this hairstyle.",
+                Priority: 20,
+                SpecificityHint: "Named");
+        }
 
         // Allied Society quest-only gathering/fishing rows.  These contiguous
         // item families are the private quest materials introduced with each
@@ -3327,6 +3379,71 @@ public sealed class SourceResolver
         }
 
         return result;
+    }
+
+    private static bool IsMarketSource(SourceEntry source) =>
+        source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase) &&
+        source.Name.Equals("Market Board / Player Trade", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPlayerFacingActionableSource(SourceEntry source)
+    {
+        var kind = source.Kind.Trim();
+        var name = source.Name.Trim();
+
+        // Market Board / player trade is generic data-wise, but it is still a
+        // concrete acquisition action and is therefore valid player guidance.
+        if (kind.Equals("Market", StringComparison.OrdinalIgnoreCase) &&
+            name.Equals("Market Board / Player Trade", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Internal resolver relationships are useful to diagnostics only. They
+        // do not answer where to go, what to run, what to exchange, or what to do.
+        if (kind.Equals("Item Conversion", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Item conversion", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Item conversion / supplemental source", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (IsIncompleteShopSource(source) || IsUnresolvedDutyPlaceholder(source))
+            return false;
+
+        // Generic placeholders must never win merely because a data relation exists.
+        if (IsGenericSourceEntry(source))
+            return false;
+
+        // Additional broad placeholders that are intentionally kept in the raw
+        // resolver graph for audits/enrichment but are not useful instructions.
+        if (name.Equals("Content Currency / Exchange Token", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Content Currency / Token", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Dye acquisition", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Materia acquisition", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Seasonal / Collaboration Event", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace(name);
+    }
+
+    private static SourceEntry ToPlayerFacingSource(SourceEntry source)
+    {
+        var detail = source.Detail;
+        if (!string.IsNullOrWhiteSpace(detail) && IsInternalResolverDetail(detail))
+            detail = null;
+
+        return source with { Detail = detail };
+    }
+
+    private static bool IsInternalResolverDetail(string detail)
+    {
+        return detail.Contains("LuminaSupplemental", StringComparison.OrdinalIgnoreCase) ||
+               detail.Contains("supplemental duty association", StringComparison.OrdinalIgnoreCase) ||
+               detail.Contains("supplemental exact duty relation", StringComparison.OrdinalIgnoreCase) ||
+               detail.Contains("resolver relationship", StringComparison.OrdinalIgnoreCase) ||
+               detail.Contains("exact-source backlog", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsGenericSourceEntry(SourceEntry source)

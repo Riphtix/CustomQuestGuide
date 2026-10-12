@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "CustomQuestGuide/1.1.13": {
+      "CustomQuestGuide/1.2.2": {
         "dependencies": {
           "LuminaSupplemental.Excel": "5.1.5"
         },
@@ -54,7 +54,7 @@
     }
   },
   "libraries": {
-    "CustomQuestGuide/1.1.13": {
+    "CustomQuestGuide/1.2.2": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

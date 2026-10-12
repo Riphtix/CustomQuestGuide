@@ -2,8 +2,8 @@
   "Author": "Riphtix",
   "Name": "Custom Quest Guide",
   "InternalName": "CustomQuestGuide",
-  "AssemblyVersion": "1.1.13.0",
-  "Description": "Target-oriented acquisition, ownership, prerequisite, duty unlock, pinning, and formal class/job progression guidance for FFXIV.",
+  "AssemblyVersion": "1.2.2.0",
+  "Description": "Target-oriented acquisition, ownership, permanent-unlock, prerequisite, progress, duty unlock, pinning, and formal class/job progression guidance for FFXIV.",
   "ApplicableVersion": "any",
   "Tags": [
     "items",
@@ -12,13 +12,16 @@
     "unlock",
     "relic",
     "loot",
-    "duties"
+    "duties",
+    "emotes",
+    "collectibles",
+    "progress"
   ],
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
   "CanUnloadAsync": false,
   "LoadPriority": 0,
-  "Punchline": "Track items, sets, jobs, and duties with acquisition and unlock guidance.",
+  "Punchline": "Track items, permanent unlocks, sets, jobs, and duties with next-step guidance.",
   "AcceptsFeedback": true
 }

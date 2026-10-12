@@ -7,7 +7,7 @@ namespace CustomQuestGuide;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 11;
+    public int Version { get; set; } = 12;
 
     public bool Detailed { get; set; } = false;
     public bool Debug { get; set; } = false;
@@ -18,6 +18,12 @@ public sealed class Configuration : IPluginConfiguration
     // The normal single-item selectors.
     public string SelectedCategory { get; set; } = "Weapons";
     public uint SelectedItemId { get; set; } = 0;
+
+    // Non-item unlock target selections. Emotes and titles are represented by
+    // their own permanent-unlock rows rather than by the consumable item that
+    // may teach/award them.
+    public ushort SelectedEmoteId { get; set; } = 0;
+    public ushort SelectedTitleId { get; set; } = 0;
 
     // Gear-only filter. Empty / "All" means do not filter by class/job.
     public string SelectedJob { get; set; } = "All";
@@ -50,7 +56,7 @@ public sealed class Configuration : IPluginConfiguration
 [Serializable]
 public sealed class PinnedTargetConfig
 {
-    // "Item", "Set", "JobUnlock", "JobProgression", or "Duty".
+    // "Item", "Emote", "Title", "Set", "JobUnlock", "JobProgression", or "Duty".
     public string Kind { get; set; } = string.Empty;
 
     // Item ID or ClassJob row ID depending on Kind.

@@ -27,6 +27,16 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly Vector4 GlamourPink = new(1.00f, 0.62f, 0.78f, 1.00f);
     private static readonly Vector4 UnresolvedRed = new(1.00f, 0.30f, 0.30f, 1.00f);
 
+    // Keep primary controls visually stable as the window grows. Controls may
+    // shrink only when the window itself becomes narrower than their preferred
+    // width, but they never stretch to fill arbitrary remaining space.
+    private const float TargetComboWidth = 520f;
+    private const float StandardComboWidth = 320f;
+    private const float JobComboWidth = 380f;
+    private const float ChainComboWidth = 440f;
+    private const float ProgressBarWidth = 420f;
+    private const float PinnedActionButtonWidth = 68f;
+
     // Some quest/NPC destinations are interior territories whose own map cannot
     // accept a normal flag. Route those names to a useful overworld entrance
     // instead of presenting a dead map button. Keys are the displayed interior
@@ -80,6 +90,9 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
+#pragma warning disable Dalamud001
+    [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
+#pragma warning restore Dalamud001
 
     private readonly Configuration config;
     private readonly NetworkRequestTracker networkRequests;
@@ -89,6 +102,9 @@ public sealed class Plugin : IDalamudPlugin
     private readonly GarlandDutyUnlockIndex garlandDutyUnlocks;
     private readonly CommunityDutyUnlockIndex communityDutyUnlocks;
     private readonly TargetCatalog catalog;
+    private readonly EmoteCatalog emoteCatalog;
+    private readonly TitleCatalog titleCatalog;
+    private readonly SharedFateProgressIndex sharedFates;
     private readonly SetCatalog setCatalog;
     private readonly JobProgressionCatalog jobCatalog;
     private readonly DutyCatalog dutyCatalog;
@@ -183,6 +199,9 @@ public sealed class Plugin : IDalamudPlugin
             Log,
             networkRequests);
         catalog = new TargetCatalog(DataManager, supplemental);
+        emoteCatalog = new EmoteCatalog(DataManager, Log);
+        titleCatalog = new TitleCatalog(DataManager, Log);
+        sharedFates = new SharedFateProgressIndex(Log);
 
         collectibleSources.BindTargets(catalog.Targets);
         // Network enrichment is deliberately not refreshed at plugin startup.
@@ -193,7 +212,7 @@ public sealed class Plugin : IDalamudPlugin
         jobCatalog = new JobProgressionCatalog(DataManager, Log);
         dutyCatalog = new DutyCatalog(DataManager, Log);
         questGuidance = new QuestGuidanceIndex(DataManager, Log);
-        ownership = new OwnershipIndex(DataManager, GameInventory, PlayerStateService, config, SaveConfig, Log);
+        ownership = new OwnershipIndex(DataManager, GameInventory, PlayerStateService, UnlockState, config, SaveConfig, Log);
         npcLocations = new NpcLocationIndex(DataManager, Log);
         dutyUnlocks = new DutyUnlockGuidanceIndex(DataManager, questGuidance, communityDutyUnlocks, garlandDutyUnlocks, Log);
         resolver = new SourceResolver(
@@ -227,7 +246,7 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Custom Quest Guide. Optionally pass an item, job, or duty name (or item ID) to search/select a traditional target.",
+            HelpMessage = "Open Custom Quest Guide. Optionally pass an item, unlock, job, or duty name (or item ID) to search/select a target.",
         });
 
         PluginInterface.UiBuilder.Draw += Draw;
@@ -309,6 +328,8 @@ public sealed class Plugin : IDalamudPlugin
             BuildPinnedOwnershipItemIds(),
             ownershipItemIds);
         dutyUnlocks.BeginPolling();
+        emoteCatalog.BeginPolling();
+        titleCatalog.BeginPolling();
 
         ownershipPollingActive = true;
         // Do not perform ownership work on the slash-command frame itself. The
@@ -328,10 +349,15 @@ public sealed class Plugin : IDalamudPlugin
         {
             ownership.PollSnapshotStep(ownershipJobIds, PermanentUnlockChecksPerPoll, refreshTransientSources);
             if (refreshTransientSources)
+            {
+                sharedFates.CaptureSnapshot();
                 ownershipTransientSnapshotCaptured = true;
+            }
             dutyUnlocks.PollSnapshotStep(256);
+            emoteCatalog.PollSnapshotStep();
+            titleCatalog.PollSnapshotStep();
 
-            if (ownership.PermanentPollingComplete && dutyUnlocks.PollingComplete)
+            if (ownership.PermanentPollingComplete && dutyUnlocks.PollingComplete && emoteCatalog.PollingComplete && titleCatalog.PollingComplete)
             {
                 ownership.FinishPolling();
                 ownershipPollingActive = false;
@@ -353,7 +379,7 @@ public sealed class Plugin : IDalamudPlugin
         // Keep this deliberately plain: no SeString payloads, custom tag color,
         // or other chat styling. It should look like an ordinary informational
         // line and only appear once per plugin/game startup.
-        ChatGui.Print("[Custom Quest Guide] /cqg opens the guide and starts one one-shot ownership scan in the background. Each queued item/duty is checked once, then CQG stops checking until /cqg is run again. See Help for details.");
+        ChatGui.Print("[Custom Quest Guide] /cqg opens the guide and starts one one-shot ownership scan in the background. Each queued item, permanent unlock, and duty is checked once, then CQG stops checking until /cqg is run again. See Help for details.");
     }
 
     private void OnCommand(string command, string args)
@@ -383,6 +409,23 @@ public sealed class Plugin : IDalamudPlugin
         if (exact is not null)
         {
             SelectItemTarget(exact);
+            return;
+        }
+
+        var exactEmote = emoteCatalog.Emotes.FirstOrDefault(e =>
+            e.Name.Equals(query, StringComparison.OrdinalIgnoreCase) ||
+            e.Command.Equals(query, StringComparison.OrdinalIgnoreCase));
+        if (exactEmote is not null)
+        {
+            SelectEmoteTarget(exactEmote);
+            return;
+        }
+
+        var exactTitle = titleCatalog.Titles.FirstOrDefault(t =>
+            t.Name.Equals(query, StringComparison.OrdinalIgnoreCase));
+        if (exactTitle is not null)
+        {
+            SelectTitleTarget(exactTitle);
             return;
         }
 
@@ -480,11 +523,11 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextUnformatted("Quick command");
         ImGui.Separator();
         ImGui.BulletText("/cqg opens Custom Quest Guide.");
-        ImGui.BulletText("/cqg <target name or item ID> searches items, jobs, and duties; sets are chosen from the separate Set dropdown on the Items tab.");
+        ImGui.BulletText("/cqg <target name or item ID> searches items, permanent unlocks, jobs, and duties; sets are chosen from the separate Set dropdown on the Items tab.");
 
         ImGui.Spacing();
         ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
-        ImGui.TextWrapped("IMPORTANT: CQG starts one complete one-shot ownership and duty-state scan when you use /cqg. The scan advances in small frame-budgeted slices until complete, then CQG performs no further ownership checks until /cqg is run again. Selecting a target during an active scan moves that target and related remaining checks to the front of the queue.");
+        ImGui.TextWrapped("IMPORTANT: CQG starts one complete one-shot ownership, permanent-unlock, and duty-state scan when you use /cqg. The scan advances in small frame-budgeted slices until complete, then CQG performs no further ownership checks until /cqg is run again. Selecting a target during an active scan moves that target and related remaining checks to the front of the queue.");
         ImGui.PopStyleColor();
 
         ImGui.Spacing();
@@ -525,8 +568,15 @@ public sealed class Plugin : IDalamudPlugin
 
         ImGui.Spacing();
         ImGui.TextWrapped("How does the Target selector work?");
-        ImGui.BulletText("The Target control combines searching and selecting for items, jobs, and duties. Sets use the separate Set dropdown on the Items tab.");
+        ImGui.BulletText("The Target control combines searching and selecting for items, permanent unlocks, jobs, and duties. Sets use the separate Set dropdown on the Items tab.");
         ImGui.BulletText("With an empty search it acts as a browser for the current tab/category; typing searches across all supported target types.");
+
+        ImGui.Spacing();
+        ImGui.TextWrapped("What new unlock targets can CQG track?");
+        ImGui.BulletText("Emotes and titles are first-class targets. Emotes can resolve through their teaching item or direct quest reward, while titles link back to their achievement.");
+        ImGui.BulletText("Hairstyles, fashion accessories, facewear, chocobo barding, Framer's Kits, and riding maps are exposed as dedicated item-backed categories.");
+        ImGui.BulletText("Riding Map sets are grouped by expansion. Endwalker and Dawntrail normal-zone maps can also show Shared FATE Rank 2 progress when the client exposes the zone counter.");
+        ImGui.BulletText("Progress bars are shown only for measurable requirements or collection progress; exact current/required values remain visible on the bar.");
 
         ImGui.Spacing();
         ImGui.TextWrapped("Why is a completion-reward mount not the next set target?");
@@ -561,7 +611,7 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.BulletText("Debug exports intentionally avoid account credentials, auth tokens, and machine-secret data.");
 
         ImGui.Spacing();
-        ImGui.TextDisabled("Custom Quest Guide 1.1.13");
+        ImGui.TextDisabled("Custom Quest Guide 1.2.0");
     }
 
     private static void DrawHelpColorRow(Vector4 color, string label, string description)
@@ -573,17 +623,28 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.TextWrapped($"— {description}");
     }
 
+    private static float GetControlWidth(float preferredWidth)
+    {
+        var available = ImGui.GetContentRegionAvail().X;
+        if (available <= 0f)
+            return preferredWidth;
+        return Math.Max(160f, Math.Min(preferredWidth, available));
+    }
+
+    private static void SetNextControlWidth(float preferredWidth) =>
+        ImGui.SetNextItemWidth(GetControlWidth(preferredWidth));
+
     private void DrawUnifiedTargetSelector()
     {
         var preview = GetUnifiedTargetPreview();
-        ImGui.SetNextItemWidth(620f);
+        SetNextControlWidth(TargetComboWidth);
         if (!ImGui.BeginCombo("Target##UnifiedTarget", preview))
             return;
 
-        ImGui.SetNextItemWidth(-1f);
+        SetNextControlWidth(TargetComboWidth - 24f);
         ImGui.InputTextWithHint(
             "##UnifiedTargetSearch",
-            "Search items, jobs, or duties...",
+            "Search items, unlocks, jobs, or duties...",
             ref targetSearch,
             128);
         ImGui.Separator();
@@ -637,6 +698,47 @@ public sealed class Plugin : IDalamudPlugin
                 shown++;
             }
 
+            foreach (var emote in emoteCatalog.Emotes
+                         .Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                     x.Command.Contains(query, StringComparison.OrdinalIgnoreCase))
+                         .OrderBy(x => SearchRank(x.Name, query))
+                         .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                         .Take(100))
+            {
+                var unlocked = emoteCatalog.IsUnlocked(emote.EmoteId) == true;
+                if (unlocked)
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                var commandSuffix = string.IsNullOrWhiteSpace(emote.Command) ? string.Empty : $" ({emote.Command})";
+                if (ImGui.Selectable($"[Emote] {emote.Name}{commandSuffix}##emote-{emote.EmoteId}"))
+                {
+                    SelectEmoteTarget(emote);
+                    ImGui.CloseCurrentPopup();
+                }
+                if (unlocked)
+                    ImGui.PopStyleColor();
+                shown++;
+            }
+
+            foreach (var title in titleCatalog.Titles
+                         .Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                     x.AchievementName.Contains(query, StringComparison.OrdinalIgnoreCase))
+                         .OrderBy(x => SearchRank(x.Name, query))
+                         .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                         .Take(80))
+            {
+                var unlocked = titleCatalog.IsUnlocked(title.TitleId) == true;
+                if (unlocked)
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                if (ImGui.Selectable($"[Title] {title.Name}##title-{title.TitleId}"))
+                {
+                    SelectTitleTarget(title);
+                    ImGui.CloseCurrentPopup();
+                }
+                if (unlocked)
+                    ImGui.PopStyleColor();
+                shown++;
+            }
+
             foreach (var target in GetGlobalSearchResults(query).Take(240))
             {
                 var ownedStatus = ownership.GetItemStatus(target.ItemId);
@@ -670,6 +772,45 @@ public sealed class Plugin : IDalamudPlugin
         {
             case MainTab.Items:
             {
+                if (config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var emote in emoteCatalog.Emotes.Take(300))
+                    {
+                        var unlocked = emoteCatalog.IsUnlocked(emote.EmoteId) == true;
+                        if (unlocked)
+                            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                        var commandSuffix = string.IsNullOrWhiteSpace(emote.Command) ? string.Empty : $" ({emote.Command})";
+                        if (ImGui.Selectable($"[Emote] {emote.Name}{commandSuffix}##emote-current-{emote.EmoteId}"))
+                        {
+                            SelectEmoteTarget(emote);
+                            ImGui.CloseCurrentPopup();
+                        }
+                        if (unlocked)
+                            ImGui.PopStyleColor();
+                        shown++;
+                    }
+                    break;
+                }
+
+                if (config.SelectedCategory.Equals("Titles", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var title in titleCatalog.Titles.Take(300))
+                    {
+                        var unlocked = titleCatalog.IsUnlocked(title.TitleId) == true;
+                        if (unlocked)
+                            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                        if (ImGui.Selectable($"[Title] {title.Name}##title-current-{title.TitleId}"))
+                        {
+                            SelectTitleTarget(title);
+                            ImGui.CloseCurrentPopup();
+                        }
+                        if (unlocked)
+                            ImGui.PopStyleColor();
+                        shown++;
+                    }
+                    break;
+                }
+
                 foreach (var target in catalog.GetTargets(config.SelectedCategory, config.SelectedJob).Take(300))
                 {
                     var ownedStatus = ownership.GetItemStatus(target.ItemId);
@@ -730,6 +871,12 @@ public sealed class Plugin : IDalamudPlugin
             return $"[Duty] {duty.Name}";
         if (activeTab == MainTab.Jobs && jobCatalog.Get(config.SelectedClassJobId) is { } job)
             return $"[Job] {job.Name} ({job.Abbreviation})";
+        if (activeTab == MainTab.Items && config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase) &&
+            emoteCatalog.Get(config.SelectedEmoteId) is { } emote)
+            return $"[Emote] {emote.Name}{(string.IsNullOrWhiteSpace(emote.Command) ? string.Empty : $" ({emote.Command})")}";
+        if (activeTab == MainTab.Items && config.SelectedCategory.Equals("Titles", StringComparison.OrdinalIgnoreCase) &&
+            titleCatalog.Get(config.SelectedTitleId) is { } title)
+            return $"[Title] {title.Name}";
         if (activeTab == MainTab.Items && catalog.GetById(config.SelectedItemId) is { } item)
             return $"[Item] {item.Name}";
         return "Search or select a target...";
@@ -740,7 +887,7 @@ public sealed class Plugin : IDalamudPlugin
         var selected = setCatalog.Get(config.SelectedSetId);
         var preview = selected is null ? "No set selected" : selected.Name;
 
-        ImGui.SetNextItemWidth(620f);
+        SetNextControlWidth(TargetComboWidth);
         if (!ImGui.BeginCombo("Set##SeparateSetTarget", preview))
             return;
 
@@ -879,6 +1026,37 @@ public sealed class Plugin : IDalamudPlugin
             $"selected set: {set.Name}");
     }
 
+    private void SelectEmoteTarget(EmoteTarget emote)
+    {
+        config.SelectedSetId = string.Empty;
+        config.SelectedCategory = "Emotes";
+        config.SelectedItemId = 0;
+        config.SelectedEmoteId = emote.EmoteId;
+        config.SelectedTitleId = 0;
+        activeTab = MainTab.Items;
+        SaveConfig();
+
+        if (emote.BackingItemId != 0 && catalog.GetById(emote.BackingItemId) is { } teachingItem)
+        {
+            RequestTargetScopedSourceEnrichment(teachingItem);
+            PromoteActiveScanTargets(
+                new[] { teachingItem.ItemId },
+                GetRelatedDutyNames(teachingItem),
+                $"selected emote: {emote.Name}");
+        }
+    }
+
+    private void SelectTitleTarget(TitleTarget title)
+    {
+        config.SelectedSetId = string.Empty;
+        config.SelectedCategory = "Titles";
+        config.SelectedItemId = 0;
+        config.SelectedEmoteId = 0;
+        config.SelectedTitleId = title.TitleId;
+        activeTab = MainTab.Items;
+        SaveConfig();
+    }
+
     private void SelectJobTarget(JobProgressionTarget job)
     {
         config.SelectedProgressionCategory = job.Category;
@@ -917,6 +1095,40 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase))
+        {
+            var selectedEmote = emoteCatalog.Get(config.SelectedEmoteId);
+            if (selectedEmote is null)
+            {
+                ImGui.Separator();
+                ImGui.TextWrapped("No emote is selected.");
+                DrawDebugPanel(null, null);
+                return;
+            }
+
+            ImGui.Separator();
+            DrawEmoteSummary(selectedEmote);
+            DrawDebugPanel(null, null);
+            return;
+        }
+
+        if (config.SelectedCategory.Equals("Titles", StringComparison.OrdinalIgnoreCase))
+        {
+            var selectedTitle = titleCatalog.Get(config.SelectedTitleId);
+            if (selectedTitle is null)
+            {
+                ImGui.Separator();
+                ImGui.TextWrapped("No title is selected.");
+                DrawDebugPanel(null, null);
+                return;
+            }
+
+            ImGui.Separator();
+            DrawTitleSummary(selectedTitle);
+            DrawDebugPanel(null, null);
+            return;
+        }
+
         var selected = catalog.GetById(config.SelectedItemId);
 
         if (selected is null)
@@ -931,6 +1143,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var result = resolver.Resolve(selected);
         DrawTargetSummary(result);
+        DrawRidingMapProgress(selected);
 
         if (config.Detailed)
             DrawDetailed(result);
@@ -957,6 +1170,7 @@ public sealed class Plugin : IDalamudPlugin
             categoryIndex = 0;
 
         var categoryNames = categories.ToArray();
+        SetNextControlWidth(StandardComboWidth);
         if (ImGui.Combo("Category##ProgressionCategory", ref categoryIndex, categoryNames, categoryNames.Length))
         {
             config.SelectedProgressionCategory = categoryNames[categoryIndex];
@@ -983,6 +1197,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var selectedJobLabel = $"{jobs[selectedIndex].Name} ({jobs[selectedIndex].Abbreviation})";
+        SetNextControlWidth(JobComboWidth);
         if (ImGui.BeginCombo("Class / Job##ProgressionJob", selectedJobLabel))
         {
             for (var i = 0; i < jobs.Count; i++)
@@ -1172,6 +1387,7 @@ public sealed class Plugin : IDalamudPlugin
         if (categoryIndex < 0)
             categoryIndex = 0;
         var categoryNames = categories.ToArray();
+        SetNextControlWidth(StandardComboWidth);
         if (ImGui.Combo("Category##DutyCategory", ref categoryIndex, categoryNames, categoryNames.Length))
         {
             config.SelectedDutyCategory = categoryNames[categoryIndex];
@@ -1249,13 +1465,13 @@ public sealed class Plugin : IDalamudPlugin
     private void DrawPinnedTargetsTab()
     {
         ImGui.TextWrapped(
-            "Unified priority queue for item, set, duty, job-unlock, and formal job-progression targets. " +
+            "Unified priority queue for item, emote, title, set, duty, job-unlock, and formal job-progression targets. " +
             "Priority is the list order.");
         ImGui.Spacing();
 
         if (config.PinnedTargets.Count == 0)
         {
-            ImGui.TextDisabled("No targets are pinned yet. Pin items, sets, duties, or class/job progression from their tabs.");
+            ImGui.TextDisabled("No targets are pinned yet. Pin items, emotes, titles, sets, duties, or class/job progression from their tabs.");
             return;
         }
 
@@ -1279,6 +1495,14 @@ public sealed class Plugin : IDalamudPlugin
                 var itemStatus = ownership.GetItemStatus(pin.NumericId);
                 DrawOwnershipText($"{i + 1}. {title}", itemStatus);
             }
+            else if (pin.Kind.Equals("Emote", StringComparison.OrdinalIgnoreCase))
+            {
+                DrawColoredText($"{i + 1}. {title}", pin.NumericId <= ushort.MaxValue && emoteCatalog.IsUnlocked((ushort)pin.NumericId) == true);
+            }
+            else if (pin.Kind.Equals("Title", StringComparison.OrdinalIgnoreCase))
+            {
+                DrawColoredText($"{i + 1}. {title}", pin.NumericId <= ushort.MaxValue && titleCatalog.IsUnlocked((ushort)pin.NumericId) == true);
+            }
             else
             {
                 DrawColoredText($"{i + 1}. {title}", IsPinComplete(pin));
@@ -1291,11 +1515,20 @@ public sealed class Plugin : IDalamudPlugin
                 ImGui.Unindent();
             }
 
-            if (ImGui.Button("Open"))
+            DrawPinnedProgress(pin);
+
+            var pinButtonSize = new Vector2(PinnedActionButtonWidth, 0f);
+            if (ImGui.Button("Open", pinButtonSize))
                 OpenPinnedTarget(pin);
 
             ImGui.SameLine();
-            if (i > 0 && ImGui.Button("Up"))
+            var canMoveUp = i > 0;
+            if (!canMoveUp)
+                ImGui.BeginDisabled();
+            var moveUp = ImGui.Button("Up", pinButtonSize);
+            if (!canMoveUp)
+                ImGui.EndDisabled();
+            if (moveUp && canMoveUp)
             {
                 SwapPins(i, i - 1);
                 ImGui.PopID();
@@ -1303,7 +1536,13 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             ImGui.SameLine();
-            if (i < config.PinnedTargets.Count - 1 && ImGui.Button("Down"))
+            var canMoveDown = i < config.PinnedTargets.Count - 1;
+            if (!canMoveDown)
+                ImGui.BeginDisabled();
+            var moveDown = ImGui.Button("Down", pinButtonSize);
+            if (!canMoveDown)
+                ImGui.EndDisabled();
+            if (moveDown && canMoveDown)
             {
                 SwapPins(i, i + 1);
                 ImGui.PopID();
@@ -1311,7 +1550,12 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             ImGui.SameLine();
-            if (i > 0 && ImGui.Button("Top"))
+            if (!canMoveUp)
+                ImGui.BeginDisabled();
+            var moveTop = ImGui.Button("Top", pinButtonSize);
+            if (!canMoveUp)
+                ImGui.EndDisabled();
+            if (moveTop && canMoveUp)
             {
                 var moving = config.PinnedTargets[i];
                 config.PinnedTargets.RemoveAt(i);
@@ -1322,7 +1566,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Remove"))
+            if (ImGui.Button("Remove", pinButtonSize))
             {
                 config.PinnedTargets.RemoveAt(i);
                 SaveConfig();
@@ -1335,6 +1579,59 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+
+    private void DrawPinnedProgress(PinnedTargetConfig pin)
+    {
+        switch (pin.Kind)
+        {
+            case "Set":
+            {
+                var set = setCatalog.Get(pin.StringId);
+                if (set is null)
+                    return;
+
+                var members = set.ItemIds
+                    .Select(catalog.GetById)
+                    .Where(x => x is not null)
+                    .Cast<TargetEntry>()
+                    .Where(x => string.IsNullOrWhiteSpace(pin.Variant) || x.EquipJobs.Contains(pin.Variant))
+                    .ToArray();
+                if (members.Length == 0)
+                    return;
+
+                var owned = members.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+                ImGui.Indent();
+                DrawProgressBar("Collection progress", owned, members.Length, "owned");
+                ImGui.Unindent();
+                break;
+            }
+            case "Item":
+            {
+                var item = catalog.GetById(pin.NumericId);
+                if (item is null || ownership.GetItemStatus(item.ItemId).IsOwned ||
+                    !item.Category.Equals("Riding Maps", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                ImGui.Indent();
+                DrawSharedFateRequirement(item, compact: true);
+                ImGui.Unindent();
+                break;
+            }
+            case "JobProgression":
+            {
+                var job = jobCatalog.Get(pin.NumericId);
+                if (job is null || !ownership.IsJobUnlocked(job.ClassJobId) || job.Progression.Count == 0)
+                    return;
+
+                var sequence = ResolveJobQuestSequence(job.Progression);
+                var completed = sequence.Entries.Count(x => x.EffectiveState == QuestProgressState.Completed);
+                ImGui.Indent();
+                DrawProgressBar("Quest progression", completed, job.Progression.Count, "quests");
+                ImGui.Unindent();
+                break;
+            }
+        }
+    }
 
     private void DrawPinnedLocationLink(PinnedTargetConfig pin, int index)
     {
@@ -1350,6 +1647,29 @@ public sealed class Plugin : IDalamudPlugin
                     DrawCombinedWhoWhereLine("Map", action.GoTo, $"pin-item-{index}");
                 else if (!string.IsNullOrWhiteSpace(action.QuestStartedBy))
                     DrawCombinedWhoWhereLine("Map", action.QuestStartedBy, $"pin-item-start-{index}");
+                break;
+            }
+            case "Emote":
+            {
+                if (pin.NumericId > ushort.MaxValue || emoteCatalog.Get((ushort)pin.NumericId) is not { } emote ||
+                    emoteCatalog.IsUnlocked(emote.EmoteId) == true)
+                    return;
+
+                if (emote.BackingItemId != 0 && catalog.GetById(emote.BackingItemId) is { } item)
+                {
+                    var action = actionGuidance.Resolve(resolver.Resolve(item));
+                    if (!string.IsNullOrWhiteSpace(action.GoTo))
+                        DrawCombinedWhoWhereLine("Map", action.GoTo, $"pin-emote-{index}");
+                    else if (!string.IsNullOrWhiteSpace(action.QuestStartedBy))
+                        DrawCombinedWhoWhereLine("Map", action.QuestStartedBy, $"pin-emote-start-{index}");
+                    return;
+                }
+
+                if (emote.QuestId != 0 && questGuidance.GetById(emote.QuestId) is { } quest &&
+                    !string.IsNullOrWhiteSpace(quest.QuestGiver) && !string.IsNullOrWhiteSpace(quest.Location))
+                {
+                    DrawNpcLocationLine("Map", quest.QuestGiver!, quest.Location, $"pin-emote-quest-{index}");
+                }
                 break;
             }
             case "Duty":
@@ -1475,6 +1795,10 @@ public sealed class Plugin : IDalamudPlugin
         {
             case "Item":
                 return ownership.GetItemStatus(pin.NumericId).IsOwned;
+            case "Emote":
+                return pin.NumericId <= ushort.MaxValue && emoteCatalog.IsUnlocked((ushort)pin.NumericId) == true;
+            case "Title":
+                return pin.NumericId <= ushort.MaxValue && titleCatalog.IsUnlocked((ushort)pin.NumericId) == true;
             case "Set":
             {
                 var set = setCatalog.Get(pin.StringId);
@@ -1793,6 +2117,12 @@ public sealed class Plugin : IDalamudPlugin
             "Item" => catalog.GetById(pin.NumericId) is { } item
                 ? $"[ITEM] {item.Name}"
                 : $"[ITEM] Missing item #{pin.NumericId}",
+            "Emote" => pin.NumericId <= ushort.MaxValue && emoteCatalog.Get((ushort)pin.NumericId) is { } emote
+                ? $"[EMOTE] {emote.Name}"
+                : $"[EMOTE] Missing emote #{pin.NumericId}",
+            "Title" => pin.NumericId <= ushort.MaxValue && titleCatalog.Get((ushort)pin.NumericId) is { } title
+                ? $"[TITLE] {title.Name}"
+                : $"[TITLE] Missing title #{pin.NumericId}",
             "Set" => setCatalog.Get(pin.StringId) is { } set
                 ? $"[SET] {set.Name}{(string.IsNullOrWhiteSpace(pin.Variant) ? string.Empty : $" — {pin.Variant} {RelicWeaponType(pin.Variant)}")}"
                 : $"[SET] Missing set {pin.StringId}",
@@ -1839,6 +2169,38 @@ public sealed class Plugin : IDalamudPlugin
                     : string.IsNullOrWhiteSpace(primary.Detail)
                         ? $"Next: {primary.Name}"
                         : $"Next: {primary.Name} — {primary.Detail}";
+            }
+            case "Emote":
+            {
+                if (pin.NumericId > ushort.MaxValue || emoteCatalog.Get((ushort)pin.NumericId) is not { } emote)
+                    return "Emote is no longer present in the current game data.";
+                if (emoteCatalog.IsUnlocked(emote.EmoteId) == true)
+                    return "Unlocked.";
+                if (emote.BackingItemId != 0 && catalog.GetById(emote.BackingItemId) is { } item)
+                {
+                    var action = actionGuidance.Resolve(resolver.Resolve(item));
+                    return action.IsEmpty
+                        ? $"Learn via {item.Name}."
+                        : $"{action.ActionLabel}: {action.ActionText}{(string.IsNullOrWhiteSpace(action.GoTo) ? string.Empty : $" — Go to {action.GoTo}")}";
+                }
+                if (emote.QuestId != 0)
+                {
+                    var quest = questGuidance.GetById(emote.QuestId);
+                    return $"Unlock via quest: {quest?.Name ?? $"Quest #{emote.QuestId}"}.";
+                }
+                return "Unlock source is not yet resolved.";
+            }
+            case "Title":
+            {
+                if (pin.NumericId > ushort.MaxValue || titleCatalog.Get((ushort)pin.NumericId) is not { } title)
+                    return "Title is no longer present in the current game data.";
+                var unlocked = titleCatalog.IsUnlocked(title.TitleId);
+                if (unlocked == true)
+                    return "Unlocked.";
+                var achievement = string.IsNullOrWhiteSpace(title.AchievementName)
+                    ? $"Achievement #{title.AchievementId}"
+                    : title.AchievementName;
+                return $"Unlock via achievement: {achievement}";
             }
             case "Set":
             {
@@ -1994,6 +2356,22 @@ public sealed class Plugin : IDalamudPlugin
                 RequestTargetScopedSourceEnrichment(item);
                 break;
             }
+            case "Emote":
+            {
+                if (pin.NumericId > ushort.MaxValue || emoteCatalog.Get((ushort)pin.NumericId) is not { } emote)
+                    return;
+                SelectEmoteTarget(emote);
+                targetSearch = string.Empty;
+                break;
+            }
+            case "Title":
+            {
+                if (pin.NumericId > ushort.MaxValue || titleCatalog.Get((ushort)pin.NumericId) is not { } title)
+                    return;
+                SelectTitleTarget(title);
+                targetSearch = string.Empty;
+                break;
+            }
             case "Set":
             {
                 if (setCatalog.Get(pin.StringId) is null)
@@ -2116,20 +2494,47 @@ public sealed class Plugin : IDalamudPlugin
         DrawUnifiedTargetSelector();
     }
 
+    private IReadOnlyList<string> GetBrowseCategories()
+    {
+        var categories = catalog.Categories.ToList();
+        if (emoteCatalog.Emotes.Count > 0 && !categories.Contains("Emotes", StringComparer.OrdinalIgnoreCase))
+        {
+            var insertAt = categories.FindIndex(x => x.Equals("Hairstyles", StringComparison.OrdinalIgnoreCase));
+            if (insertAt < 0)
+                insertAt = categories.FindIndex(x => x.Equals("Decorations & Housing", StringComparison.OrdinalIgnoreCase));
+            if (insertAt < 0)
+                categories.Add("Emotes");
+            else
+                categories.Insert(insertAt, "Emotes");
+        }
+        if (titleCatalog.Titles.Count > 0 && !categories.Contains("Titles", StringComparer.OrdinalIgnoreCase))
+        {
+            var insertAt = categories.FindIndex(x => x.Equals("Decorations & Housing", StringComparison.OrdinalIgnoreCase));
+            if (insertAt < 0)
+                categories.Add("Titles");
+            else
+                categories.Insert(insertAt, "Titles");
+        }
+        return categories;
+    }
+
     private void DrawItemFilterControls()
     {
-        var categories = catalog.Categories;
+        var categories = GetBrowseCategories();
         var categoryIndex = IndexOf(categories, config.SelectedCategory);
         if (categoryIndex < 0)
             categoryIndex = 0;
 
         var categoryNames = categories.ToArray();
+        SetNextControlWidth(StandardComboWidth);
         if (ImGui.Combo("Category##ItemBrowseCategory", ref categoryIndex, categoryNames, categoryNames.Length))
         {
             config.SelectedSetId = string.Empty;
             config.SelectedCategory = categoryNames[categoryIndex];
             config.SelectedJob = "All";
             config.SelectedItemId = 0;
+            config.SelectedEmoteId = 0;
+            config.SelectedTitleId = 0;
             config.SelectedChainIndex = 0;
             SelectFirstTarget();
             SaveConfig();
@@ -2143,6 +2548,7 @@ public sealed class Plugin : IDalamudPlugin
                 jobIndex = 0;
 
             var jobNames = jobs.ToArray();
+            SetNextControlWidth(JobComboWidth);
             if (ImGui.Combo("Class / Job##ItemBrowseJob", ref jobIndex, jobNames, jobNames.Length))
             {
                 config.SelectedSetId = string.Empty;
@@ -2222,7 +2628,9 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Separator();
         ImGui.TextWrapped(set.Description);
         ImGui.Spacing();
-        ImGui.TextUnformatted($"Set Progress: {ownedCount} / {members.Length} owned; {resolved} / {members.Length} source-resolved");
+        DrawProgressBar("Collection progress", ownedCount, members.Length, "owned");
+        if (config.Detailed)
+            ImGui.TextDisabled($"Source coverage: {resolved} / {members.Length} members resolved");
 
         DrawSetFrontierGuidance(set, members);
         ImGui.Spacing();
@@ -2275,6 +2683,12 @@ public sealed class Plugin : IDalamudPlugin
                     DrawCombinedWhoWhereLine("Go to", action.GoTo, $"set-member-{member.ItemId}");
                     ImGui.Unindent();
                 }
+                if (member.Category.Equals("Riding Maps", StringComparison.OrdinalIgnoreCase))
+                {
+                    ImGui.Indent();
+                    DrawSharedFateRequirement(member, compact: true);
+                    ImGui.Unindent();
+                }
                 continue;
             }
 
@@ -2289,7 +2703,199 @@ public sealed class Plugin : IDalamudPlugin
 
             if (primary is null)
                 ImGui.PopStyleColor();
+
+            if (member.Category.Equals("Riding Maps", StringComparison.OrdinalIgnoreCase))
+            {
+                ImGui.Indent();
+                DrawSharedFateRequirement(member, compact: true);
+                ImGui.Unindent();
+            }
         }
+    }
+
+    private static void DrawProgressBar(string label, int current, int required, string unit = "")
+    {
+        if (required <= 0)
+            return;
+
+        var fraction = Math.Clamp(current / (float)required, 0f, 1f);
+        var suffix = string.IsNullOrWhiteSpace(unit) ? string.Empty : $" {unit}";
+        ImGui.TextUnformatted(label);
+        var width = GetControlWidth(ProgressBarWidth);
+        ImGui.ProgressBar(fraction, new Vector2(width, 0f), $"{current} / {required}{suffix}");
+    }
+
+    private void DrawRidingMapProgress(TargetEntry target)
+    {
+        if (!target.Category.Equals("Riding Maps", StringComparison.OrdinalIgnoreCase) ||
+            ownership.GetItemStatus(target.ItemId).IsOwned)
+            return;
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Progress");
+        ImGui.Separator();
+        DrawSharedFateRequirement(target, compact: false);
+    }
+
+    private void DrawSharedFateRequirement(TargetEntry target, bool compact)
+    {
+        // Only Endwalker and Dawntrail normal field-zone riding maps are gated
+        // by Shared FATE Rank 2. Shadowbringers traders expose their riding maps
+        // without that rank gate, even though those zones also have Shared FATE data.
+        if (!IsSharedFateExpansionMap(target.Name))
+            return;
+
+        var progress = sharedFates.GetForRidingMap(target.Name);
+        if (progress is null)
+        {
+            ImGui.TextDisabled(sharedFates.HasSnapshot
+                ? "Shared FATE progress for this zone was not found in the current snapshot."
+                : sharedFates.InitializationAttempted
+                    ? "Shared FATE progress is not currently available from the client. CQG attempted to initialize the Shared FATE data during this /cqg scan."
+                    : "Shared FATE progress is not currently available from the client.");
+            return;
+        }
+
+        const int requiredRank = 2;
+        if (progress.CurrentRank >= requiredRank)
+        {
+            DrawColoredText($"Shared FATE Rank {requiredRank} requirement met", true);
+            return;
+        }
+
+        var needed = progress.NeededFates > 0 ? progress.NeededFates : (ushort)6;
+        var current = Math.Clamp((int)progress.FateProgress, 0, (int)needed);
+        if (!compact)
+            ImGui.TextUnformatted($"{progress.ZoneName} — Shared FATE Rank {progress.CurrentRank} / {requiredRank}");
+        DrawProgressBar(compact ? "Shared FATE" : "Progress toward Rank 2", current, needed, "FATEs");
+        var remaining = Math.Max(0, needed - current);
+        ImGui.TextDisabled($"{remaining} qualifying FATE{(remaining == 1 ? string.Empty : "s")} remaining.");
+    }
+
+    private static bool IsSharedFateExpansionMap(string itemName)
+    {
+        // Shadowbringers Gemstone Traders sell their riding maps without a
+        // Shared FATE rank gate. Rank 2 is specifically required for the normal
+        // Endwalker and Dawntrail field-zone maps.
+        string[] zones =
+        [
+            "Labyrinthos", "Thavnair", "Garlemald", "Mare Lamentorum", "Elpis", "Ultima Thule",
+            "Urqopacha", "Kozama'uka", "Yak T'el", "Shaaloani", "Heritage Found", "Living Memory",
+        ];
+        return zones.Any(zone => itemName.Equals($"{zone} Riding Map", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void DrawEmoteSummary(EmoteTarget emote)
+    {
+        var unlocked = emoteCatalog.IsUnlocked(emote.EmoteId);
+        ImGui.Spacing();
+        if (unlocked == true)
+            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+        ImGui.TextUnformatted(emote.Name.ToUpperInvariant());
+        if (unlocked == true)
+            ImGui.PopStyleColor();
+        ImGui.SameLine();
+        DrawPinToggle("Emote", emote.EmoteId, string.Empty);
+        ImGui.Separator();
+
+        if (!string.IsNullOrWhiteSpace(emote.Command))
+            ImGui.TextDisabled($"Command: {emote.Command}");
+
+        if (unlocked == true)
+            DrawColoredText("Unlocked", true);
+        else if (unlocked == false)
+            ImGui.TextUnformatted("Locked");
+        else
+            ImGui.TextDisabled("Ownership state is unavailable in the current one-shot snapshot.");
+
+        if (emote.BackingItemId != 0 && catalog.GetById(emote.BackingItemId) is { } item)
+        {
+            var result = resolver.Resolve(item);
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Unlock item:");
+            ImGui.SameLine();
+            ImGui.TextUnformatted(item.Name);
+
+            var primary = result.Sources.FirstOrDefault();
+            ImGui.TextUnformatted("Source:");
+            ImGui.SameLine();
+            if (primary is null)
+                ImGui.TextDisabled("No source resolved yet");
+            else
+            {
+                ImGui.TextUnformatted(primary.Name);
+                if (!string.IsNullOrWhiteSpace(primary.Detail))
+                {
+                    ImGui.SameLine();
+                    ImGui.TextDisabled($"— {primary.Detail}");
+                }
+            }
+
+            DrawDutyDependency(result, $"emote-{emote.EmoteId}");
+            DrawExchangePrerequisiteControls(item.ItemId);
+            if (result.Guide is null)
+                DrawSourceActionGuidance(result);
+
+            if (config.Detailed)
+            {
+                ImGui.Spacing();
+                ImGui.TextDisabled($"Teaching item ID: {item.ItemId}");
+                ImGui.TextDisabled($"Emote ID: {emote.EmoteId}");
+                if (emote.UnlockLink != 0)
+                    ImGui.TextDisabled($"Unlock link: {emote.UnlockLink}");
+            }
+            return;
+        }
+
+        if (emote.QuestId != 0)
+        {
+            var quest = questGuidance.GetById(emote.QuestId);
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Unlock quest:");
+            ImGui.SameLine();
+            ImGui.TextUnformatted(quest?.Name ?? $"Quest #{emote.QuestId}");
+            if (quest is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(quest.QuestGiver) && !string.IsNullOrWhiteSpace(quest.Location))
+                    DrawNpcLocationLine("Go to", quest.QuestGiver!, quest.Location, $"emote-quest-{emote.EmoteId}");
+            }
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("No item or quest source was resolved for this emote yet.");
+        if (config.Detailed && emote.UnlockLink != 0)
+            ImGui.TextDisabled($"Unlock link: {emote.UnlockLink}");
+    }
+
+    private void DrawTitleSummary(TitleTarget title)
+    {
+        var unlocked = titleCatalog.IsUnlocked(title.TitleId);
+        ImGui.Spacing();
+        if (unlocked == true)
+            ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+        ImGui.TextUnformatted(title.Name.ToUpperInvariant());
+        if (unlocked == true)
+            ImGui.PopStyleColor();
+        ImGui.SameLine();
+        DrawPinToggle("Title", title.TitleId, string.Empty);
+        ImGui.Separator();
+
+        if (unlocked == true)
+            DrawColoredText("Unlocked", true);
+        else if (unlocked == false)
+            ImGui.TextUnformatted("Locked");
+        else
+            ImGui.TextDisabled("Ownership state is unavailable in the current one-shot snapshot.");
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Achievement");
+        ImGui.Separator();
+        ImGui.TextWrapped(string.IsNullOrWhiteSpace(title.AchievementName)
+            ? $"Achievement #{title.AchievementId}"
+            : title.AchievementName);
+        if (!string.IsNullOrWhiteSpace(title.AchievementDescription))
+            ImGui.TextWrapped(title.AchievementDescription);
     }
 
     private static bool IsRelicSet(TargetSet set) =>
@@ -2324,6 +2930,7 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.Spacing();
         ImGui.TextUnformatted(set.Name.ToUpperInvariant());
         ImGui.Separator();
+        SetNextControlWidth(JobComboWidth);
         if (ImGui.Combo("Job / Weapon##RelicJob", ref jobIndex, labels, labels.Length))
         {
             config.SelectedRelicJob = jobs[jobIndex];
@@ -3616,10 +4223,12 @@ public sealed class Plugin : IDalamudPlugin
 
     private void AppendTargetInformation(StringBuilder output, TargetEntry target, string? containingSetId)
     {
-        // IMPORTANT: Resolve() consumes only local/live data plus caches. The
-        // cached-only action/duty methods below explicitly suppress every
-        // EnsureLoaded/EnsureRequested network path.
-        var result = resolver.Resolve(target);
+        // IMPORTANT: ResolveDiagnostic() consumes only local/live data plus caches.
+        // It intentionally includes internal resolver relationships because this
+        // export is a Debug diagnostic; player-facing UI uses Resolve(), which
+        // filters those records out. The cached-only action/duty methods below
+        // explicitly suppress every EnsureLoaded/EnsureRequested network path.
+        var result = resolver.ResolveDiagnostic(target);
         var primary = result.Sources.FirstOrDefault();
         var owned = ownership.GetItemStatus(target.ItemId);
         var action = actionGuidance.Resolve(result, allowNetworkRequests: false);
@@ -4366,6 +4975,10 @@ public sealed class Plugin : IDalamudPlugin
         }
         else
         {
+            var hasGameplaySource = result.Sources.Any(source =>
+                !(source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase) &&
+                  source.Name.Equals("Market Board / Player Trade", StringComparison.OrdinalIgnoreCase)));
+
             foreach (var source in result.Sources)
             {
                 var suffix = source.IsUnlocked switch
@@ -4398,8 +5011,14 @@ public sealed class Plugin : IDalamudPlugin
                 {
                     if (dutyUnlocked)
                         ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
+                    var sourceLabel = hasGameplaySource &&
+                                      source.Kind.Equals("Market", StringComparison.OrdinalIgnoreCase) &&
+                                      source.Name.Equals("Market Board / Player Trade", StringComparison.OrdinalIgnoreCase)
+                        ? "Alternative"
+                        : source.Kind;
+
                     ImGui.BulletText(
-                        $"{source.Kind}: {source.Name}{detail}{suffix}");
+                        $"{sourceLabel}: {source.Name}{detail}{suffix}");
                     if (dutyUnlocked)
                         ImGui.PopStyleColor();
                 }
@@ -4427,6 +5046,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var names = guide.Chains.Select(c => c.Name).ToArray();
 
+        SetNextControlWidth(ChainComboWidth);
         if (ImGui.Combo("Prerequisite Chain", ref chainIndex, names, names.Length))
         {
             config.SelectedChainIndex = chainIndex;
@@ -4821,7 +5441,7 @@ public sealed class Plugin : IDalamudPlugin
             config.SelectedSetId = string.Empty;
         }
 
-        var categories = catalog.Categories;
+        var categories = GetBrowseCategories();
         if (categories.Count == 0)
             return;
 
@@ -4831,11 +5451,27 @@ public sealed class Plugin : IDalamudPlugin
         if (!catalog.Jobs.Contains(config.SelectedJob, StringComparer.OrdinalIgnoreCase))
             config.SelectedJob = "All";
 
-        var validTargets = catalog.GetTargets(config.SelectedCategory, config.SelectedJob);
-        var selected = catalog.GetById(config.SelectedItemId);
-
-        if (selected is null || !validTargets.Any(t => t.ItemId == selected.ItemId))
-            SelectFirstTarget();
+        if (config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase))
+        {
+            if (emoteCatalog.Get(config.SelectedEmoteId) is null)
+                config.SelectedEmoteId = emoteCatalog.Emotes.FirstOrDefault()?.EmoteId ?? 0;
+            config.SelectedItemId = 0;
+            config.SelectedTitleId = 0;
+        }
+        else if (config.SelectedCategory.Equals("Titles", StringComparison.OrdinalIgnoreCase))
+        {
+            if (titleCatalog.Get(config.SelectedTitleId) is null)
+                config.SelectedTitleId = titleCatalog.Titles.FirstOrDefault()?.TitleId ?? 0;
+            config.SelectedItemId = 0;
+            config.SelectedEmoteId = 0;
+        }
+        else
+        {
+            var validTargets = catalog.GetTargets(config.SelectedCategory, config.SelectedJob);
+            var selected = catalog.GetById(config.SelectedItemId);
+            if (selected is null || !validTargets.Any(t => t.ItemId == selected.ItemId))
+                SelectFirstTarget();
+        }
 
         var progressionCategories = jobCatalog.Categories;
         if (progressionCategories.Count > 0)
@@ -4874,6 +5510,24 @@ public sealed class Plugin : IDalamudPlugin
 
     private void SelectFirstTarget()
     {
+        if (config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase))
+        {
+            config.SelectedItemId = 0;
+            config.SelectedEmoteId = emoteCatalog.Emotes.FirstOrDefault()?.EmoteId ?? 0;
+            config.SelectedTitleId = 0;
+            return;
+        }
+
+        if (config.SelectedCategory.Equals("Titles", StringComparison.OrdinalIgnoreCase))
+        {
+            config.SelectedItemId = 0;
+            config.SelectedEmoteId = 0;
+            config.SelectedTitleId = titleCatalog.Titles.FirstOrDefault()?.TitleId ?? 0;
+            return;
+        }
+
+        config.SelectedEmoteId = 0;
+        config.SelectedTitleId = 0;
         config.SelectedItemId =
             catalog.GetTargets(config.SelectedCategory, config.SelectedJob)
                 .FirstOrDefault()

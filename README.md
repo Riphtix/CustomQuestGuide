@@ -1,15 +1,15 @@
-# Custom Quest Guide 1.1.13
+# Custom Quest Guide 1.2.2
 
 Custom Quest Guide (CQG) is a target-oriented FFXIV plugin for answering a practical question: **what do I still need, and what should I do next?**
 
 ## Quick commands
 
 - `/cqg` — open CQG and start a bounded character-state refresh.
-- `/cqg <target name or item ID>` — open CQG, start the same refresh, and directly open exact item, set, job, or duty matches when possible.
+- `/cqg <target name or item ID>` — open CQG, start the same refresh, and directly open exact item, permanent-unlock, set, job, or duty matches when possible.
 
 ## Character-state refresh model
 
-CQG does **not** continuously poll ownership or duty unlock state for the whole game session. In this v1.1.13 optimized one-shot build, each use of `/cqg` starts **one complete background ownership/duty pass** with no wall-clock cutoff. The pass advances on framework updates using a small per-frame processing budget, then stops completely after the queue is exhausted. CQG does not continue ownership polling while you play. Selected targets and their related duties are promoted to the front of any still-running scan.
+CQG does **not** continuously poll ownership, permanent-unlock state, or duty unlock state for the whole game session. In v1.2, each use of `/cqg` starts **one complete background ownership/unlock/duty pass** with no wall-clock cutoff. The pass advances on framework updates using a small per-frame processing budget, then stops completely after the queue is exhausted. CQG does not continue ownership polling while you play. Selected targets and their related duties are promoted to the front of any still-running scan.
 
 The permanent-ownership queue is ordered as: selected/visible targets, pinned targets, known collection/registration types, then generic ItemAction capability discovery. Irreversible permanent unlocks already confirmed owned are reused rather than re-queried.
 
@@ -25,15 +25,16 @@ Glamour Dresser ownership remains persisted per character using the character Co
 - **Red** — CQG has not resolved a trusted acquisition source for that unowned target.
 - **Default / white** — not yet owned or complete with no additional highlighted state.
 
-## v1.1 features
+## v1.2 features
 
-- One unified **Target** control combines search and selection across items, jobs, and duties; sets use a separate **Set** dropdown on the Items tab.
-- New **Duties** tab built from Content Finder data.
-- Duties are first-class pinnable targets.
-- Unlocked duty dependencies are highlighted green anywhere CQG surfaces them.
-- Locked duty dependencies show the best known unlock quest, contact, and location, and offer a **Pin Duty** action.
-- Supported location names are clickable; CQG opens the in-game map and places a flag using authoritative NPC placement data or explicit coordinates.
-- Duty unlock state is checked once during the one-shot `/cqg` scan rather than being queried continuously while the UI is open.
+- **First-class Emote targets**: search the actual emote name or slash command. CQG maps item-taught emotes back through their teaching item and direct quest-reward emotes back through their quest where local game data exposes the relationship.
+- **First-class Title targets**: search and pin titles, detect unlocked titles from the game's title list, and show the backing achievement/description where available.
+- Dedicated item-backed categories for **Hairstyles, Fashion Accessories, Facewear, Chocobo Barding, Framer's Kits, and Riding Maps**.
+- **Riding Map sets by expansion** that include all maps from that expansion, plus focused Shadowbringers/Dawntrail field-operation subsets for Bozja/Zadnor and Occult Crescent.
+- **Shared FATE prerequisite progress** for Endwalker and Dawntrail normal-zone riding maps when the client exposes the persistent zone counter. Shadowbringers maps intentionally do not receive a false Rank 2 requirement.
+- Reusable **progress bars** for measurable completion/requirements such as set ownership and Shared FATE counters. Exact `current / required` values remain visible.
+- The existing one-shot `/cqg` refresh model is preserved: the new permanent-unlock snapshots do not introduce continuous idle polling.
+- Blue Mage spells are intentionally **not** advertised as supported in 1.2; dedicated limited-job support is reserved for a future version that can be tested properly.
 
 ## Major existing features
 
@@ -54,12 +55,12 @@ CQG primarily uses local game/client data. When that data is incomplete, it can 
 
 ## Configuration resilience
 
-Configuration schema version: **11**. v1.1 adds saved duty-tab navigation and the `Duty` pin type while preserving existing pins and per-character Glamour Dresser snapshots.
+Configuration schema version: **12**. v1.2 adds saved Emote/Title selection and the `Emote`/`Title` pin kinds while preserving existing pins and per-character Glamour Dresser snapshots.
 
 ## Version
 
-Assembly/file version: **1.1.13.0**  
-Release: **1.1.13**
+Assembly/file version: **1.2.2.0**  
+Release: **1.2.2**
 
 See `CHANGELOG.md` and `CREDITS.md` for release history and data/tool attribution.
 
@@ -77,7 +78,7 @@ In **Detailed > Debug**, **Clear cached items** resets CQG's current-character o
 
 ## One-shot ownership scan
 
-`/cqg` starts one complete background ownership/duty scan with no wall-clock cutoff. Each queued permanent item and duty is checked at most once, then CQG stops all ownership checking until `/cqg` is run again. Inventory/Armoury/saddlebags/available retainers, Glamour Dresser cache, Armoire, and job state are snapshotted once at the beginning of the scan. If a target or set is selected while the scan is still running, its remaining item and related duty checks are promoted to the front of the queue without repeating anything already checked.
+`/cqg` starts one complete background ownership/permanent-unlock/duty scan with no wall-clock cutoff. Each queued permanent item, first-class unlock, and duty is checked at most once, then CQG stops all ownership checking until `/cqg` is run again. Inventory/Armoury/saddlebags/available retainers, Glamour Dresser cache, Armoire, and job state are snapshotted once at the beginning of the scan. If a target or set is selected while the scan is still running, its remaining item and related duty checks are promoted to the front of the queue without repeating anything already checked.
 
 
 ### Acquisition guidance quality

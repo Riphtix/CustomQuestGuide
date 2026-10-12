@@ -5,7 +5,7 @@
   },
   "projects": {
     "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj": {
-      "version": "1.1.13",
+      "version": "1.2.2",
       "restore": {
         "projectUniqueName": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj",
         "projectName": "CustomQuestGuide",

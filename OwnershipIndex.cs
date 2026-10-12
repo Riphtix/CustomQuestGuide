@@ -30,6 +30,7 @@ public sealed class OwnershipIndex
     private readonly IDataManager data;
     private readonly IGameInventory inventory;
     private readonly IPlayerState playerState;
+    private readonly IUnlockState unlockState;
     private readonly Configuration config;
     private readonly System.Action saveConfig;
     private readonly IPluginLog log;
@@ -143,6 +144,7 @@ public sealed class OwnershipIndex
         IDataManager data,
         IGameInventory inventory,
         IPlayerState playerState,
+        IUnlockState unlockState,
         Configuration config,
         System.Action saveConfig,
         IPluginLog log)
@@ -150,6 +152,7 @@ public sealed class OwnershipIndex
         this.data = data;
         this.inventory = inventory;
         this.playerState = playerState;
+        this.unlockState = unlockState;
         this.config = config;
         this.saveConfig = saveConfig;
         this.log = log;
@@ -408,6 +411,36 @@ public sealed class OwnershipIndex
 
             if (ornamentByItem.TryGetValue(itemId, out var ornamentId) && ornamentId != 0 && player->IsOrnamentUnlocked(ornamentId))
                 return new PermanentUnlockCheckResult(new OwnershipStatus(true, "Fashion Accessories"), true);
+        }
+
+        // Dalamud's unlock-state service centralizes the game's supported
+        // item-unlock checks and is more complete than calling the raw
+        // ItemAction helper directly. Riding Maps are especially important here:
+        // they permanently change per-zone mount speed but are not reliably
+        // reported by every ItemAction path. Prefer this service for any item it
+        // explicitly recognizes as unlockable, then retain the lower-level checks
+        // below as a compatibility fallback.
+        try
+        {
+            var item = data.GetExcelSheet<Item>().GetRow(itemId);
+#pragma warning disable Dalamud001
+            if (unlockState.IsItemUnlockable(item))
+            {
+                var isUnlocked = unlockState.IsItemUnlocked(item);
+                if (!isUnlocked)
+                    return new PermanentUnlockCheckResult(OwnershipStatus.Missing, true);
+
+                var itemName = item.Name.ExtractText().Trim();
+                var source = itemName.EndsWith(" Riding Map", StringComparison.OrdinalIgnoreCase)
+                    ? "Mount Speed / Riding Map Unlock"
+                    : "Registered / Collection Unlock";
+                return new PermanentUnlockCheckResult(new OwnershipStatus(true, source), true);
+            }
+#pragma warning restore Dalamud001
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, $"Dalamud unlock-state check failed for item {itemId}; falling back to client ItemAction state.");
         }
 
         if (uiState != null)

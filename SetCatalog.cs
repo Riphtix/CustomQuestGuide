@@ -29,6 +29,7 @@ public sealed class SetCatalog
             itemByName.TryAdd(target.Name, target.ItemId);
 
         BuildExtremeMountSets();
+        BuildRidingMapSets();
         BuildRelicSets();
         BuildRelicToolSets();
     }
@@ -146,6 +147,129 @@ public sealed class SetCatalog
                 "Wings of Legacy",
             ],
             ["Wings of Legacy"]);
+    }
+
+
+    private void BuildRidingMapSets()
+    {
+        AddNamedSet(
+            "riding-maps-arr",
+            "Riding Map Sets",
+            "A Realm Reborn Riding Maps",
+            "Riding maps for the A Realm Reborn overworld zones.",
+            [
+                "Middle La Noscea Riding Map",
+                "Lower La Noscea Riding Map",
+                "Eastern La Noscea Riding Map",
+                "Western La Noscea Riding Map",
+                "Upper La Noscea Riding Map",
+                "Outer La Noscea Riding Map",
+                "Central Shroud Riding Map",
+                "East Shroud Riding Map",
+                "South Shroud Riding Map",
+                "North Shroud Riding Map",
+                "Western Thanalan Riding Map",
+                "Central Thanalan Riding Map",
+                "Eastern Thanalan Riding Map",
+                "Southern Thanalan Riding Map",
+                "Northern Thanalan Riding Map",
+                "Coerthas Central Highlands Riding Map",
+                "Mor Dhona Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-hw",
+            "Riding Map Sets",
+            "Heavensward Riding Maps",
+            "Riding maps for the six Heavensward field zones.",
+            [
+                "Coerthas Western Highlands Riding Map",
+                "Dravanian Forelands Riding Map",
+                "Dravanian Hinterlands Riding Map",
+                "Churning Mists Riding Map",
+                "Sea Of Clouds Riding Map",
+                "Azys Lla Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-sb",
+            "Riding Map Sets",
+            "Stormblood Riding Maps",
+            "Riding maps for the six Stormblood field zones.",
+            [
+                "Fringes Riding Map",
+                "Peaks Riding Map",
+                "Lochs Riding Map",
+                "Ruby Sea Riding Map",
+                "Yanxia Riding Map",
+                "Azim Steppe Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-shb",
+            "Riding Map Sets",
+            "Shadowbringers Riding Maps",
+            "All Shadowbringers riding maps: the six Bicolor Gemstone field-zone maps plus the Bozjan Southern Front and Zadnor maps.",
+            [
+                "Lakeland Riding Map",
+                "Kholusia Riding Map",
+                "Amh Araeng Riding Map",
+                "Il Mheg Riding Map",
+                "Rak'tika Greatwood Riding Map",
+                "Tempest Riding Map",
+                "Bozjan Southern Front Riding Map",
+                "Zadnor Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-shb-field-ops",
+            "Riding Map Sets",
+            "Shadowbringers Field Operations Riding Maps",
+            "Riding maps for the Bozjan Southern Front and Zadnor.",
+            [
+                "Bozjan Southern Front Riding Map",
+                "Zadnor Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-ew",
+            "Riding Map Sets",
+            "Endwalker Riding Maps",
+            "Shared FATE Rank 2 riding maps for the six Endwalker field zones.",
+            [
+                "Labyrinthos Riding Map",
+                "Thavnair Riding Map",
+                "Garlemald Riding Map",
+                "Mare Lamentorum Riding Map",
+                "Elpis Riding Map",
+                "Ultima Thule Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-dt",
+            "Riding Map Sets",
+            "Dawntrail Riding Maps",
+            "All Dawntrail riding maps: the six Shared FATE Rank 2 field-zone maps plus the Occult Crescent field-operation maps.",
+            [
+                "Urqopacha Riding Map",
+                "Kozama'uka Riding Map",
+                "Yak T'el Riding Map",
+                "Shaaloani Riding Map",
+                "Heritage Found Riding Map",
+                "Living Memory Riding Map",
+                "South Horn Riding Map",
+                "North Horn Riding Map",
+            ]);
+
+        AddNamedSet(
+            "riding-maps-dt-field-ops",
+            "Riding Map Sets",
+            "Dawntrail Field Operations Riding Maps",
+            "Riding maps for the Occult Crescent field-operation zones.",
+            [
+                "South Horn Riding Map",
+                "North Horn Riding Map",
+            ]);
     }
 
     private void BuildRelicSets()
@@ -333,6 +457,7 @@ public sealed class SetCatalog
     private static int SetGroupSortKey(string group) => group switch
     {
         "Mount Sets" => 0,
+        "Riding Map Sets" => 5,
         "Relic Sets" => 10,
         "Relic Tool Sets" => 20,
         _ => 100,
