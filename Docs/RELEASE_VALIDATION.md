@@ -1,3 +1,13 @@
+## v1.3.7.1 hotfix validation
+
+- [x] Static: duty labels include the actual duty type and level, e.g. `Dungeon: Mt. Gulg - Lv. 79`.
+- [x] Static: treasure-map instances normalize to the `Treasure Dungeons` category.
+- [x] Static: `DutyTarget.TypeLabel` renders that category as singular `Treasure Dungeon`.
+- [x] Static: canonical treasure example is `Treasure Dungeon: The Dungeons of Lyhe Ghiah - Lv. 1`.
+- [x] Static: release metadata is consistent at `1.3.7.1` and pluginmaster links target `v1.3.7.1/CustomQuestGuide_v1.3.7.1.zip`.
+- [ ] Runtime: verify dungeon, trial, raid/alliance, and treasure-dungeon labels in game.
+- [ ] Runtime: verify existing duty Open/Pin actions still behave normally.
+
 ## v1.3.7 validation
 
 - Open a normally crafted item and expand its recipe.

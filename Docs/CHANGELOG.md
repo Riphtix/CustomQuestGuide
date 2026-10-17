@@ -1,3 +1,13 @@
+# v1.3.7.1 — duty identity/level hotfix
+
+- Duty display labels now identify treasure-map instances as `Treasure Dungeon`, e.g. `Treasure Dungeon: The Dungeons of Lyhe Ghiah - Lv. 1`, instead of falling back to generic `Duty`.
+- Treasure dungeons are also grouped under a dedicated `Treasure Dungeons` duty category while retaining the shared level/type formatting used by all duties.
+- Duty labels now include the duty type, name, and required character level in the canonical form `Dungeon: Mt. Gulg - Lv. 79`.
+- Applies the same duty identity formatting to the Duties tab, unified target search/preview, pinned duties, duty dependencies, monster duty context, and `Run` guidance.
+- Uses the class/job entry-level requirement only; item-level requirements are no longer eligible as a fallback for the displayed `Lv.` value.
+- Keeps duty category filtering plural (`Dungeons`, `Trials`, `Raids`, `Alliance Raids`) while player-facing duty identity uses singular type labels.
+- Release metadata and package links updated for the v1.3.7.1 hotfix.
+
 # v1.3.7 — release-prep source cleanup
 
 - Reorganized the flat source root into `Core`, `Domain`, `Data`, `Resolution`, `UI`, and `Infrastructure` responsibility folders.

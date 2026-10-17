@@ -1498,7 +1498,7 @@ public sealed partial class Plugin
         ImGui.SameLine();
         if (unlocked == true)
             ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-        ImGui.TextUnformatted(dutyName);
+        ImGui.TextUnformatted(duty?.DisplayLabel ?? dutyCatalog.GetDisplayLabel(dutyName));
         if (unlocked == true)
             ImGui.PopStyleColor();
 
@@ -1650,13 +1650,15 @@ public sealed partial class Plugin
         if (!frontier.Action.IsEmpty)
         {
             var actionIsUnlockedDuty = frontier.Action.ActionLabel.Equals("Run", StringComparison.OrdinalIgnoreCase);
+            var actionDuty = dutyCatalog.GetByName(frontier.Action.ActionText);
+            var actionText = actionIsUnlockedDuty && actionDuty is not null
+                ? actionDuty.DisplayLabel
+                : frontier.Action.ActionText;
             if (actionIsUnlockedDuty)
                 ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-            ImGui.TextUnformatted($"{frontier.Action.ActionLabel}: {frontier.Action.ActionText}");
+            ImGui.TextUnformatted($"{frontier.Action.ActionLabel}: {actionText}");
             if (actionIsUnlockedDuty)
                 ImGui.PopStyleColor();
-
-            var actionDuty = dutyCatalog.GetByName(frontier.Action.ActionText);
             if (actionDuty is not null)
             {
                 ImGui.SameLine();
@@ -1676,12 +1678,12 @@ public sealed partial class Plugin
             if (advice.IsUnlocked == true)
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-                ImGui.TextUnformatted($"Run: {advice.DutyName}");
+                ImGui.TextUnformatted($"Run: {duty?.DisplayLabel ?? dutyCatalog.GetDisplayLabel(advice.DutyName)}");
                 ImGui.PopStyleColor();
             }
             else
             {
-                ImGui.TextUnformatted($"Unlock content: {advice.DutyName}");
+                ImGui.TextUnformatted($"Unlock content: {duty?.DisplayLabel ?? dutyCatalog.GetDisplayLabel(advice.DutyName)}");
                 if (!string.IsNullOrWhiteSpace(advice.QuestName))
                     ImGui.TextUnformatted($"Unlock via: {advice.QuestName}");
                 if (!string.IsNullOrWhiteSpace(advice.Contact))
@@ -1736,7 +1738,7 @@ public sealed partial class Plugin
                 ? $"[JOB] {progressionJob.Name} Progression"
                 : $"[JOB] Missing ClassJob #{pin.NumericId}",
             "Duty" => dutyCatalog.Get(pin.NumericId) is { } duty
-                ? $"[DUTY] {duty.Name}"
+                ? $"[DUTY] {duty.DisplayLabel}"
                 : $"[DUTY] Missing ContentFinderCondition #{pin.NumericId}",
             _ => $"[UNKNOWN] {pin.Kind}",
         };
@@ -1865,13 +1867,13 @@ public sealed partial class Plugin
                     if (frontier.DutyAdvice is { } advice)
                     {
                         if (advice.IsUnlocked == true)
-                            return $"{prefix}: {frontier.Member.Name} — Run: {advice.DutyName}";
+                            return $"{prefix}: {frontier.Member.Name} — Run: {dutyCatalog.GetDisplayLabel(advice.DutyName)}";
 
                         var via = string.IsNullOrWhiteSpace(advice.QuestName) ? string.Empty : $" via {advice.QuestName}";
                         var who = string.IsNullOrWhiteSpace(advice.Contact)
                             ? string.Empty
                             : $" — Talk to {advice.Contact}{(string.IsNullOrWhiteSpace(advice.Location) ? string.Empty : $" — {advice.Location}")}";
-                        return $"{prefix}: {frontier.Member.Name} — Unlock: {advice.DutyName}{via}{who}";
+                        return $"{prefix}: {frontier.Member.Name} — Unlock: {dutyCatalog.GetDisplayLabel(advice.DutyName)}{via}{who}";
                     }
                 }
 

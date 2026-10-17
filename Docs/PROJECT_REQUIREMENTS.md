@@ -462,3 +462,23 @@ When a monster coordinate belongs to a conservatively cataloged special area who
 - When a selected target needs FFXIV Collect event/store/collectible source data, CQG must request the relevant collection family on demand and update the visible target automatically when the request completes.
 - A user must not have to press the broad `Refresh acquisition sources` button merely to make an already-selected target consume the async result.
 - Keep this target-scoped and cached; do not restore continuous/global background polling.
+
+
+## Duty identity presentation (v1.3.7.1+)
+- Every player-facing duty reference should identify the duty type and required character level when the Content Finder row provides one.
+- Canonical form: `Dungeon: Mt. Gulg - Lv. 79`; equivalent types are `Trial`, `Raid`, and `Alliance Raid`.
+- The displayed `Lv.` value is character/class-job entry level only. Never substitute minimum item level into that field.
+- Reuse the duty domain object's canonical display label across search, selected duty, pinned targets, dependencies, monster duty context, and action guidance rather than rebuilding strings ad hoc in UI code.
+
+## Object-oriented architecture (standing requirement)
+- Future CQG work must use proper object-oriented design rather than accumulating patchwork conditionals or oversized partial classes.
+- Prefer cohesive domain objects, encapsulated responsibilities, composition/strategy interfaces where appropriate, dependency injection/testable seams, and small focused classes.
+- Avoid god classes, excessive partial-class sprawl, duplicated presentation policy, and file-count reduction achieved by merging unrelated concerns.
+- Refactors must preserve validated runtime behavior while improving maintainability, ownership boundaries, and extensibility.
+
+
+## Treasure-dungeon duty identity (v1.3.7.1+)
+
+- Treasure-map instances must be classified and displayed as `Treasure Dungeon`, never the generic `Duty` label.
+- Canonical player-facing formatting is `Treasure Dungeon: <Name> - Lv. <required level>`.
+- This classification must flow through the shared `DutyTarget.DisplayLabel` so Duties, item dependencies, pins, Run guidance, and other duty surfaces stay consistent.

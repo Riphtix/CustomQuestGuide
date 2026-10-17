@@ -3,7 +3,7 @@
     "Author": "Riphtix",
     "Name": "Custom Quest Guide",
     "InternalName": "CustomQuestGuide",
-    "AssemblyVersion": "1.3.7.0",
+    "AssemblyVersion": "1.3.7.1",
     "DalamudApiLevel": 15,
     "Description": "Tracks FFXIV acquisition, unlock, and progression targets and helps determine what to do next.",
     "Punchline": "Track what you want and find the next step.",
@@ -11,7 +11,7 @@
     "RepoUrl": "https://github.com/Riphtix/CustomQuestGuide",
     "IsHide": false,
     "IsTestingExclusive": false,
-    "DownloadLinkInstall": "https://github.com/Riphtix/CustomQuestGuide/releases/download/v1.3.7/CustomQuestGuide_v1.3.7.zip",
-    "DownloadLinkUpdate": "https://github.com/Riphtix/CustomQuestGuide/releases/download/v1.3.7/CustomQuestGuide_v1.3.7.zip"
+    "DownloadLinkInstall": "https://github.com/Riphtix/CustomQuestGuide/releases/download/v1.3.7.1/CustomQuestGuide_v1.3.7.1.zip",
+    "DownloadLinkUpdate": "https://github.com/Riphtix/CustomQuestGuide/releases/download/v1.3.7.1/CustomQuestGuide_v1.3.7.1.zip"
   }
 ]

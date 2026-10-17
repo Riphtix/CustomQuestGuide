@@ -602,14 +602,14 @@ public sealed partial class Plugin
         var unlocked = advice?.IsUnlocked ?? dutyUnlocks.IsDutyUnlocked(duty.Name);
         if (unlocked == true)
             ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-        ImGui.TextUnformatted(duty.Name.ToUpperInvariant());
+        ImGui.TextUnformatted(duty.DisplayLabel.ToUpperInvariant());
         if (unlocked == true)
             ImGui.PopStyleColor();
 
         ImGui.SameLine();
         DrawPinToggle("Duty", duty.ContentFinderConditionId, string.Empty, "Pin Duty", "Unpin Duty");
 
-        ImGui.TextDisabled(duty.Category + (duty.RequiredLevel > 0 ? $" — Lv. {duty.RequiredLevel}" : string.Empty));
+        ImGui.TextDisabled($"Category: {duty.Category}");
         ImGui.Spacing();
 
         if (unlocked == true)

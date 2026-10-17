@@ -750,7 +750,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 var unlocked = dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
                 if (unlocked)
                     ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-                if (ImGui.Selectable($"[Duty] {duty.Name}##duty-{duty.ContentFinderConditionId}"))
+                if (ImGui.Selectable($"[Duty] {duty.DisplayLabel}##duty-{duty.ContentFinderConditionId}"))
                 {
                     SelectDutyTarget(duty);
                     ImGui.CloseCurrentPopup();
@@ -914,7 +914,7 @@ public sealed partial class Plugin : IDalamudPlugin
                     var unlocked = dutyUnlocks.IsDutyUnlocked(duty.Name) == true;
                     if (unlocked)
                         ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
-                    if (ImGui.Selectable($"[Duty] {duty.Name}##duty-current-{duty.ContentFinderConditionId}"))
+                    if (ImGui.Selectable($"[Duty] {duty.DisplayLabel}##duty-current-{duty.ContentFinderConditionId}"))
                     {
                         SelectDutyTarget(duty);
                         ImGui.CloseCurrentPopup();
@@ -930,7 +930,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private string GetUnifiedTargetPreview()
     {
         if (activeTab == MainTab.Duties && dutyCatalog.Get(config.SelectedDutyId) is { } duty)
-            return $"[Duty] {duty.Name}";
+            return $"[Duty] {duty.DisplayLabel}";
         if (activeTab == MainTab.Jobs && jobCatalog.Get(config.SelectedClassJobId) is { } job)
             return $"[Job] {job.Name} ({job.Abbreviation})";
         if (activeTab == MainTab.Items && config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase) &&

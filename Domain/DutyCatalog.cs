@@ -11,7 +11,22 @@ public sealed record DutyTarget(
     uint InstanceContentId,
     string Name,
     string Category,
-    ushort RequiredLevel);
+    ushort RequiredLevel)
+{
+    public string TypeLabel => Category switch
+    {
+        "Dungeons" => "Dungeon",
+        "Trials" => "Trial",
+        "Raids" => "Raid",
+        "Alliance Raids" => "Alliance Raid",
+        "Treasure Dungeons" => "Treasure Dungeon",
+        _ => "Duty",
+    };
+
+    public string DisplayLabel => RequiredLevel > 0
+        ? $"{TypeLabel}: {Name} - Lv. {RequiredLevel}"
+        : $"{TypeLabel}: {Name}";
+}
 
 /// <summary>
 /// First-class duty target catalog built from ContentFinderCondition. Duties are
@@ -75,6 +90,8 @@ public sealed class DutyCatalog
 
     public DutyTarget? Get(uint cfcId) => byId.TryGetValue(cfcId, out var duty) ? duty : null;
 
+    public string GetDisplayLabel(string name) => GetByName(name)?.DisplayLabel ?? name;
+
     public DutyTarget? GetByName(string name)
     {
         var raw = (name ?? string.Empty).Trim();
@@ -123,6 +140,7 @@ public sealed class DutyCatalog
         "Trials" => 1,
         "Raids" => 2,
         "Alliance Raids" => 3,
+        "Treasure Dungeons" => 4,
         _ => 10,
     };
 
@@ -157,6 +175,8 @@ public sealed class DutyCatalog
             return "Raids";
         if (contentTypeName.Contains("trial", StringComparison.OrdinalIgnoreCase))
             return "Trials";
+        if (contentTypeName.Contains("treasure", StringComparison.OrdinalIgnoreCase))
+            return "Treasure Dungeons";
         if (contentTypeName.Contains("dungeon", StringComparison.OrdinalIgnoreCase))
             return "Dungeons";
 
@@ -165,11 +185,13 @@ public sealed class DutyCatalog
 
     private static ushort ReadLevel(ContentFinderCondition cfc)
     {
+        // This is the character/class-job level required to enter the duty.
+        // Do not fall back to ItemLevelRequired here: that is gear item level and
+        // would produce misleading labels such as "Lv. 440" for level-80 duties.
         var value = ReflectionUtil.GetNumericProperty(cfc,
             "ClassJobLevelRequired",
             "RequiredClassJobLevel",
-            "ClassJobLevel",
-            "ItemLevelRequired");
+            "ClassJobLevel");
         if (!value.HasValue || value.Value <= 0 || value.Value > ushort.MaxValue)
             return 0;
         return (ushort)value.Value;

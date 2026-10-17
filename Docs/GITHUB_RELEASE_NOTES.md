@@ -1,3 +1,30 @@
+# Custom Quest Guide v1.3.7.1
+
+## Hotfix
+
+- Duties now show their type and required character level everywhere CQG identifies them, using labels such as `Dungeon: Mt. Gulg - Lv. 79`.
+- Treasure-map instances now use the specific `Treasure Dungeon` type, e.g. `Treasure Dungeon: The Dungeons of Lyhe Ghiah - Lv. 1`, instead of generic `Duty`.
+- Shared duty formatting covers the Duties tab, search/target preview, pinned duties, duty dependencies, monster duty context, and Run guidance.
+- The displayed `Lv.` is the class/job entry level only; minimum item level can no longer be mistaken for character level.
+
+## v1.3.7 release highlights
+
+- Added crafting-only breadcrumb navigation for recipe drill-down while keeping normal Back/Forward navigation independent.
+- Added Need/Greed target markers for directly targeted items and still-needed set members without automating loot decisions.
+- Reworked event and Online Store acquisition handling with route-level availability, historical-event provenance, paid-store routes, outfit/bundle item handling, and automatic selected-target enrichment.
+- Added progression-aware NPC map routing and explicit View Map actions for actionable NPC destinations.
+- Reworked Pinned Targets into a cached 30-second snapshot view to avoid expensive resolver work at frame rate.
+- Improved monster acquisition presentation with duty/FATE/levequest context, multiple spawn locations, coordinate confidence handling, and progression-gated area guidance.
+- Cleaned and reorganized the source tree into clearer Core, Domain, Data, Resolution, UI, and Infrastructure responsibilities while preserving runtime behavior.
+
+## Release metadata
+
+- Assembly version: `1.3.7.1`
+- Dalamud API level: `15`
+- Expected release asset: `CustomQuestGuide_v1.3.7.1.zip`
+
+---
+
 ## v1.3.7 — Crafted-item drill-down breadcrumbs
 
 - Added crafting-only breadcrumbs when opening recipe ingredients.

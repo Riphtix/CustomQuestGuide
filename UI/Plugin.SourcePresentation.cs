@@ -368,9 +368,8 @@ public sealed partial class Plugin
             return;
 
         ImGui.Indent();
-        ImGui.TextDisabled(dutyName);
-
         var duty = GetDutyFromSource(new SourceEntry("Activity", dutyName));
+        ImGui.TextDisabled(duty?.DisplayLabel ?? dutyCatalog.GetDisplayLabel(dutyName));
         if (duty is not null)
         {
             ImGui.SameLine();
@@ -1463,11 +1462,13 @@ public sealed partial class Plugin
         }
 
         var runUnlockedDuty = guidance.ActionLabel.Equals("Run", StringComparison.OrdinalIgnoreCase);
+        var actionDuty = runUnlockedDuty ? dutyCatalog.GetByName(guidance.ActionText) : null;
+        var actionText = actionDuty?.DisplayLabel ?? guidance.ActionText;
         if (runUnlockedDuty)
             ImGui.PushStyleColor(ImGuiCol.Text, OwnedGreen);
         ImGui.TextUnformatted($"{guidance.ActionLabel}:");
         ImGui.SameLine();
-        ImGui.TextUnformatted(guidance.ActionText);
+        ImGui.TextUnformatted(actionText);
         if (runUnlockedDuty)
             ImGui.PopStyleColor();
 

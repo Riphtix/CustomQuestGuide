@@ -1,4 +1,4 @@
-# Custom Quest Guide 1.3.7
+# Custom Quest Guide 1.3.7.1
 
 Custom Quest Guide (CQG) is a target-oriented FFXIV plugin for answering a practical question: **what do I still need, and what should I do next?**
 
@@ -51,7 +51,7 @@ Glamour Dresser ownership remains persisted per character using the character Co
 
 ## External acquisition sources
 
-CQG primarily uses local game/client data. When that data is incomplete, it can supplement acquisition guidance using LuminaSupplemental, FFXIV Collect, Garland Tools, and the cached community duty index. The /cqg ownership scan itself performs no community HTTP refresh. FFXIV Collect is refreshed only through the explicit Refresh acquisition sources button (5-minute cooldown). Garland item documents are requested only for an actively selected item that still needs enrichment, one request at a time with a 2-second pace and failure backoff. Duty fallbacks are likewise on-demand and cached.
+CQG primarily uses local game/client data. When that data is incomplete, it can supplement acquisition guidance using LuminaSupplemental, FFXIV Collect, Garland Tools, and the cached community duty index. The /cqg ownership scan itself performs no community HTTP refresh. Selected targets may request the specific FFXIV Collect family they need on demand, then cache and automatically consume the result; the broad Refresh acquisition sources button remains available for explicit refreshes. Garland item documents are requested only for an actively selected item that still needs enrichment, one request at a time with pacing and failure backoff. Duty and Online Store fallbacks are likewise target-scoped/on-demand and cached rather than continuously polled.
 
 ## Configuration resilience
 
@@ -59,8 +59,8 @@ Configuration schema version: **12**. v1.2 adds saved Emote/Title selection and 
 
 ## Version
 
-Assembly/file version: **1.3.7.0**  
-Release: **1.3.7**
+Assembly/file version: **1.3.7.1**  
+Release: **1.3.7.1**
 
 See `Docs/CHANGELOG.md` and `Docs/CREDITS.md` for release history and data/tool attribution.
 
