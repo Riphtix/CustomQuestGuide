@@ -36,6 +36,29 @@ public sealed record SharedFateProgressSnapshot(
     ushort FateProgress,
     ushort NeededFates);
 
+public enum MonsterCoordinateConfidence
+{
+    Verified = 0,
+    Unverified = 1,
+}
+
+public sealed record MonsterSpawnLocation(
+    uint TerritoryTypeId,
+    string ZoneName,
+    float X,
+    float Y,
+    uint? ZoneLevel = null,
+    uint? MapId = null,
+    float? WorldX = null,
+    float? WorldZ = null,
+    bool IsFallback = false,
+    MonsterCoordinateConfidence Confidence = MonsterCoordinateConfidence.Verified);
+
+public sealed record MonsterLeveContext(
+    uint LeveId,
+    string Name,
+    uint Level);
+
 public sealed record SourceEntry(
     string Kind,
     string Name,
@@ -43,7 +66,28 @@ public sealed record SourceEntry(
     bool? IsUnlocked = null,
     int Priority = 100,
     string? SpecificityHint = null,
-    uint? NpcId = null);
+    uint? NpcId = null,
+    uint? MonsterLevel = null,
+    uint? MonsterZoneLevel = null,
+    IReadOnlyList<MonsterSpawnLocation>? MonsterLocations = null,
+    uint? MonsterNameId = null,
+    uint? MonsterBaseId = null,
+    string? EnrichmentKey = null,
+    string? MonsterDutyName = null,
+    IReadOnlyList<string>? MonsterFateNames = null,
+    IReadOnlyList<MonsterLeveContext>? MonsterLeves = null);
+
+public sealed record CraftingIngredientInfo(
+    uint ItemId,
+    string Name,
+    uint Amount);
+
+public sealed record CraftingRecipeInfo(
+    uint RecipeId,
+    string Job,
+    byte Level,
+    uint AmountResult,
+    IReadOnlyList<CraftingIngredientInfo> Ingredients);
 
 
 public sealed record ExchangeDependencyInfo(
@@ -136,6 +180,30 @@ public sealed record QuestGuidanceInfo(
     string? QuestGiver,
     string? Location,
     IReadOnlyList<uint> PreviousQuestIds);
+
+public sealed record QuestPrerequisiteResolution(
+    string TargetQuestName,
+    QuestGuidanceInfo? Target,
+    QuestGuidanceInfo? Actionable,
+    QuestProgressState ActionableState,
+    IReadOnlyList<QuestGuidanceInfo> Path,
+    bool IsComplete,
+    bool HasUnresolvedPrerequisite)
+{
+    public static QuestPrerequisiteResolution Unresolved(string targetQuestName, QuestGuidanceInfo? target = null) =>
+        new(targetQuestName, target, null, QuestProgressState.NotStarted, Array.Empty<QuestGuidanceInfo>(), false, true);
+
+    public static QuestPrerequisiteResolution Complete(QuestGuidanceInfo target) =>
+        new(target.Name, target, null, QuestProgressState.Completed, [target], true, false);
+
+    public static QuestPrerequisiteResolution Action(
+        QuestGuidanceInfo target,
+        QuestGuidanceInfo actionable,
+        QuestProgressState state,
+        IReadOnlyList<QuestGuidanceInfo> path,
+        bool hasUnresolvedPrerequisite = false) =>
+        new(target.Name, target, actionable, state, path, false, hasUnresolvedPrerequisite);
+}
 
 public sealed record QuestSequenceEntry(
     string Name,

@@ -49,6 +49,9 @@ public sealed class CollectibleSourceIndex : IDisposable
     private readonly IPluginLog log;
     private readonly NetworkRequestTracker networkRequests;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
+    private readonly ConcurrentDictionary<uint, byte> targetLoadsInFlight = new();
+    private readonly ConcurrentDictionary<uint, DateTime> targetCheckedUtc = new();
+    private static readonly TimeSpan TargetCheckMaxAge = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource disposeCts = new();
 
     private readonly ConcurrentDictionary<uint, List<SourceEntry>> sources = new();
@@ -165,6 +168,198 @@ public sealed class CollectibleSourceIndex : IDisposable
 
     public bool HasSource(uint itemId) =>
         sources.TryGetValue(itemId, out var list) && list.Count > 0;
+
+    public bool IsTargetLoading(uint itemId) => targetLoadsInFlight.ContainsKey(itemId);
+
+    public bool IsTargetChecked(uint itemId) =>
+        targetCheckedUtc.TryGetValue(itemId, out var checkedUtc) &&
+        DateTime.UtcNow - checkedUtc <= TargetCheckMaxAge;
+
+    /// <summary>
+    /// Loads only the FFXIV Collect collection families relevant to the actively
+    /// selected target. This is the normal selected-target enrichment path; it
+    /// avoids requiring the user to press the broad Refresh button before a
+    /// collectible/event/store source becomes visible. Results merge directly
+    /// into the live source index, so the next UI frame re-resolves naturally.
+    /// </summary>
+    public async Task EnsureTargetAsync(TargetEntry target)
+    {
+        if (target.ItemId == 0)
+            return;
+
+        if (IsTargetChecked(target.ItemId))
+            return;
+
+        if (!targetLoadsInFlight.TryAdd(target.ItemId, 0))
+            return;
+
+        try
+        {
+            var anySucceeded = false;
+            foreach (var endpoint in GetTargetEndpoints(target))
+            {
+                try
+                {
+                    if (await LoadTargetEndpointAsync(endpoint, target, disposeCts.Token))
+                        anySucceeded = true;
+                }
+                catch (OperationCanceledException) when (disposeCts.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    log.Debug(ex, $"CQG target-scoped FFXIV Collect endpoint failed: {endpoint} for {target.Name}.");
+                }
+            }
+
+            // Only mark the target checked when at least one relevant endpoint
+            // answered successfully. Transient service failures remain retryable.
+            if (anySucceeded)
+                targetCheckedUtc[target.ItemId] = DateTime.UtcNow;
+        }
+        finally
+        {
+            targetLoadsInFlight.TryRemove(target.ItemId, out _);
+        }
+    }
+
+    private static IReadOnlyList<string> GetTargetEndpoints(TargetEntry target)
+    {
+        return target.Category switch
+        {
+            "Mounts" => ["mounts"],
+            "Minions" => ["minions"],
+            "Orchestrion Rolls" => ["orchestrions"],
+            "Triple Triad Cards" => ["cards"],
+            "Hairstyles" => ["hairstyles"],
+            "Fashion Accessories" => ["fashions"],
+            "Facewear" => ["facewear"],
+            "Outfits" or "Armor" or "Weapons" or "Accessories" or "Other Items" => ["outfits", "armoires"],
+            _ => ["armoires", "outfits"],
+        };
+    }
+
+    private async Task<bool> LoadTargetEndpointAsync(
+        string endpoint,
+        TargetEntry target,
+        CancellationToken cancellationToken)
+    {
+        var url = $"https://ffxivcollect.com/api/{endpoint}?limit=5000";
+        networkRequests.Request("FFXIV Collect selected target");
+        using var response = await http.GetAsync(url, cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            networkRequests.Failure("FFXIV Collect selected target");
+            return false;
+        }
+
+        networkRequests.Success("FFXIV Collect selected target");
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+        JsonElement results;
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            results = document.RootElement;
+        }
+        else if (!document.RootElement.TryGetProperty("results", out results) ||
+                 results.ValueKind != JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        var normalizedTarget = NormalizeAlias(target.Name);
+        foreach (var record in results.EnumerateArray())
+        {
+            if (!RecordMatchesSelectedTarget(record, target, normalizedTarget))
+                continue;
+
+            if (!record.TryGetProperty("sources", out var sourceArray) ||
+                sourceArray.ValueKind != JsonValueKind.Array)
+                continue;
+
+            var list = sources.GetOrAdd(target.ItemId, _ => []);
+            foreach (var source in sourceArray.EnumerateArray())
+            {
+                var type = ReadString(source, "type") ?? "Community";
+                var text = ReadString(source, "text");
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                var kind = NormalizeKind(type, text);
+                var sourceEntry = new SourceEntry(
+                    kind,
+                    $"{kind}: {text}",
+                    Detail: "FFXIV Collect",
+                    Priority: 5);
+
+                lock (list)
+                {
+                    if (!list.Any(x =>
+                            string.Equals(x.Kind, sourceEntry.Kind, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(x.Name, sourceEntry.Name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        list.Add(sourceEntry);
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static bool RecordMatchesSelectedTarget(JsonElement record, TargetEntry target, string normalizedTarget)
+    {
+        if (TryReadUInt(record, "item_id", out var itemId) && itemId == target.ItemId)
+            return true;
+
+        foreach (var property in new[] { "name", "item_name", "itemName" })
+        {
+            var value = ReadString(record, property);
+            if (!string.IsNullOrWhiteSpace(value) && NormalizeAlias(value) == normalizedTarget)
+                return true;
+        }
+
+        if (record.TryGetProperty("item", out var nestedItem))
+        {
+            if (nestedItem.ValueKind == JsonValueKind.String &&
+                NormalizeAlias(nestedItem.GetString() ?? string.Empty) == normalizedTarget)
+                return true;
+
+            if (nestedItem.ValueKind == JsonValueKind.Object)
+            {
+                if (TryReadUInt(nestedItem, "id", out var nestedId) && nestedId == target.ItemId)
+                    return true;
+                var nestedName = ReadString(nestedItem, "name") ?? ReadString(nestedItem, "item_name");
+                if (!string.IsNullOrWhiteSpace(nestedName) && NormalizeAlias(nestedName) == normalizedTarget)
+                    return true;
+            }
+        }
+
+        if (record.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in items.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String &&
+                    NormalizeAlias(item.GetString() ?? string.Empty) == normalizedTarget)
+                    return true;
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+                if (TryReadUInt(item, "item_id", out var childId) && childId == target.ItemId)
+                    return true;
+                if (TryReadUInt(item, "id", out childId) && childId == target.ItemId)
+                    return true;
+                var childName = ReadString(item, "name") ?? ReadString(item, "item_name");
+                if (!string.IsNullOrWhiteSpace(childName) && NormalizeAlias(childName) == normalizedTarget)
+                    return true;
+            }
+        }
+
+        return false;
+    }
 
     public async Task RefreshAsync()
     {
@@ -501,6 +696,7 @@ public sealed class CollectibleSourceIndex : IDisposable
             return false;
 
         sources.Clear();
+        targetCheckedUtc.Clear();
         IsLoaded = false;
         Status = "Not loaded";
         return true;

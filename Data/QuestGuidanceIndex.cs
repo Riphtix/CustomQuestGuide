@@ -42,6 +42,125 @@ public sealed class QuestGuidanceIndex
     public QuestGuidanceInfo? GetBestByName(string name) =>
         GetByName(name).FirstOrDefault();
 
+    /// <summary>
+    /// Resolve a target quest backwards through its formal PreviousQuest links
+    /// and return the first actionable unmet prerequisite known to game data.
+    /// This is intentionally generic so locked areas, duties, relics, and other
+    /// future systems can all ask CQG the same question: "what do I do next?"
+    /// </summary>
+    public QuestPrerequisiteResolution ResolvePrerequisiteFrontier(
+        string targetQuestName,
+        Func<uint, QuestProgressState> stateProvider)
+    {
+        var candidates = GetByName(targetQuestName);
+        if (candidates.Count == 0)
+            return QuestPrerequisiteResolution.Unresolved(targetQuestName);
+
+        // Any completed candidate proves the named unlock quest is complete.
+        foreach (var candidate in candidates)
+        {
+            if (stateProvider(candidate.QuestId) == QuestProgressState.Completed)
+                return QuestPrerequisiteResolution.Complete(candidate);
+        }
+
+        // Prefer an actually active candidate over inferred prerequisites.
+        foreach (var candidate in candidates)
+        {
+            if (stateProvider(candidate.QuestId) == QuestProgressState.InProgress)
+                return QuestPrerequisiteResolution.Action(candidate, candidate, QuestProgressState.InProgress, [candidate]);
+        }
+
+        QuestPrerequisiteResolution? best = null;
+        foreach (var candidate in candidates)
+        {
+            var resolved = ResolvePrerequisiteFrontier(candidate, stateProvider, new HashSet<uint>());
+            if (best is null || IsBetterPrerequisiteResolution(resolved, best))
+                best = resolved;
+        }
+
+        return best ?? QuestPrerequisiteResolution.Unresolved(targetQuestName);
+    }
+
+    private QuestPrerequisiteResolution ResolvePrerequisiteFrontier(
+        QuestGuidanceInfo target,
+        Func<uint, QuestProgressState> stateProvider,
+        HashSet<uint> path)
+    {
+        if (!path.Add(target.QuestId))
+            return QuestPrerequisiteResolution.Unresolved(target.Name, target);
+
+        try
+        {
+            var targetState = stateProvider(target.QuestId);
+            if (targetState == QuestProgressState.Completed)
+                return QuestPrerequisiteResolution.Complete(target);
+            if (targetState == QuestProgressState.InProgress)
+                return QuestPrerequisiteResolution.Action(target, target, targetState, [target]);
+
+            var incompletePrerequisites = new List<QuestPrerequisiteResolution>();
+            var unresolvedPrevious = false;
+
+            foreach (var previousId in target.PreviousQuestIds.Where(x => x != 0).Distinct())
+            {
+                var previous = GetById(previousId);
+                if (previous is null)
+                {
+                    unresolvedPrevious = true;
+                    continue;
+                }
+
+                if (stateProvider(previous.QuestId) == QuestProgressState.Completed)
+                    continue;
+
+                var branch = ResolvePrerequisiteFrontier(previous, stateProvider, path);
+                incompletePrerequisites.Add(branch with
+                {
+                    Path = branch.Path.Concat([target]).DistinctBy(x => x.QuestId).ToArray()
+                });
+            }
+
+            if (incompletePrerequisites.Count > 0)
+            {
+                // If multiple formal prerequisites exist, prefer an in-progress
+                // branch, then the deepest known branch. This does not invent an
+                // ordering between parallel requirements; it simply gives the
+                // player one concrete next action.
+                return incompletePrerequisites
+                    .OrderByDescending(x => x.ActionableState == QuestProgressState.InProgress)
+                    .ThenByDescending(x => x.Path.Count)
+                    .First();
+            }
+
+            // If all known formal predecessors are complete, the target itself is
+            // the next action. Preserve whether an unknown predecessor existed so
+            // the caller can supplement with explicit non-quest requirements.
+            return QuestPrerequisiteResolution.Action(
+                target,
+                target,
+                QuestProgressState.NotStarted,
+                [target],
+                hasUnresolvedPrerequisite: unresolvedPrevious);
+        }
+        finally
+        {
+            path.Remove(target.QuestId);
+        }
+    }
+
+    private static bool IsBetterPrerequisiteResolution(
+        QuestPrerequisiteResolution candidate,
+        QuestPrerequisiteResolution current)
+    {
+        if (candidate.IsComplete != current.IsComplete)
+            return candidate.IsComplete;
+        if ((candidate.ActionableState == QuestProgressState.InProgress) !=
+            (current.ActionableState == QuestProgressState.InProgress))
+            return candidate.ActionableState == QuestProgressState.InProgress;
+        if ((candidate.Actionable is not null) != (current.Actionable is not null))
+            return candidate.Actionable is not null;
+        return candidate.Path.Count > current.Path.Count;
+    }
+
 
     public QuestSequenceStatus ResolveQuestIds(
         IEnumerable<uint> questIds,

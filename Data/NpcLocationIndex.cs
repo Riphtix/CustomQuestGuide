@@ -46,6 +46,7 @@ public sealed class NpcLocationIndex
             // Keep exact, verified fallbacks narrow; normal sheet-derived
             // placement always wins when it exists.
             ["Hhihwi"] = "Solution Nine (X:8.7, Y:13.4)",
+            ["Eirene"] = "Solution Nine (X:8.1, Y:14.0)",
         };
 
     public string? GetBestLocation(string npcName)

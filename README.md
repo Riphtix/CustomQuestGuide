@@ -1,4 +1,4 @@
-# Custom Quest Guide 1.2.2
+# Custom Quest Guide 1.3.7
 
 Custom Quest Guide (CQG) is a target-oriented FFXIV plugin for answering a practical question: **what do I still need, and what should I do next?**
 
@@ -59,10 +59,10 @@ Configuration schema version: **12**. v1.2 adds saved Emote/Title selection and 
 
 ## Version
 
-Assembly/file version: **1.2.2.0**  
-Release: **1.2.2**
+Assembly/file version: **1.3.7.0**  
+Release: **1.3.7**
 
-See `CHANGELOG.md` and `CREDITS.md` for release history and data/tool attribution.
+See `Docs/CHANGELOG.md` and `Docs/CREDITS.md` for release history and data/tool attribution.
 
 
 ## Duty unlock fallback
@@ -98,3 +98,13 @@ Catalog-wide resolver coverage is never recomputed from the live render loop. Th
 
 ### 1.1.13 resolver quality pass
 The 1.1.13 resolver quality pass prefers complete actionable acquisition paths over first-found source rows, preserves multiple legitimate routes, and avoids presenting uncertain SpecialShop currency sentinels or ambiguous same-name NPC placements as authoritative.
+
+
+## Developer architecture
+
+The codebase is intentionally split by responsibility so acquisition rules can be extended without tracing one monolithic plugin file. See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) for the resolver flow, file ownership, and extension rules.
+
+### Special-area access guidance
+For known field-operation locales, CQG distinguishes an inaccessible map from a bad coordinate. If the area is still locked, CQG follows the area's unlock quest prerequisites to the first concrete unmet/current quest and shows who/where to go next. Explicit non-journal gates such as Eureka elemental-level/story requirements are shown alongside the quest step.
+
+Monster acquisition guidance can also show an expandable **Levequest** context when local game data identifies battle leves containing that enemy. This relationship is resolved locally and does not require network enrichment.

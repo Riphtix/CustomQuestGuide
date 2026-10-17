@@ -189,7 +189,7 @@ public sealed class SourceActionGuidanceResolver
         source.Name.Contains("Special / Currency Shop", StringComparison.OrdinalIgnoreCase) ||
         source.Name.Contains("Vendor", StringComparison.OrdinalIgnoreCase);
 
-    private static string? ExtractNamedNpc(SourceEntry source)
+    internal static string? ExtractNamedNpc(SourceEntry source)
     {
         var name = source.Name.Trim();
         var directPrefixes = new[] { "Vendor: ", "Triple Triad NPC: ", "NPC: " };
