@@ -14,6 +14,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool Detailed { get; set; } = false;
     public bool Debug { get; set; } = false;
 
+    // Preferences for confirmed-completion pin lifecycle actions.
+    public bool AutoUnpinCompletedTargets { get; set; } = true;
+    public bool CompletionChatNotifications { get; set; } = true;
+
     // Set Target is optional. Empty means normal single-item targeting.
     public string SelectedSetId { get; set; } = string.Empty;
 
@@ -48,11 +52,44 @@ public sealed class Configuration : IPluginConfiguration
     // Unified priority queue. List order is the user's priority order.
     public List<PinnedTargetConfig> PinnedTargets { get; set; } = [];
 
+    // One native-HUD-style tracker for all focused Watchlist entries.
+    public bool FocusedTrackingLeftAligned { get; set; } = false;
+    public bool FocusedTrackingEditMode { get; set; } = false;
+    public bool FocusedTrackingAttachToQuestList { get; set; } = false;
+    public float FocusedTrackingQuestListGap { get; set; } = 8f;
+    public float FocusedTrackingQuestListHorizontalOffset { get; set; } = 0f;
+    // New installations show native FFXIV icons. Older saved preferences are preserved
+    // through the deserialization-only legacy property below.
+    public bool FocusedTrackingShowIcons { get; set; } = true;
+
+    // Compatibility with configurations saved before the emoji renderer was replaced.
+    // Json.NET reads this property but ShouldSerialize keeps the old name out of new saves.
+    [Obsolete("Read legacy configuration only; use FocusedTrackingShowIcons.")]
+    public bool FocusedTrackingShowEmojiIcons
+    {
+        get => FocusedTrackingShowIcons;
+        set => FocusedTrackingShowIcons = value;
+    }
+
+    public bool ShouldSerializeFocusedTrackingShowEmojiIcons() => false;
+    public float FocusedTrackingX { get; set; } = -1f;
+    public float FocusedTrackingY { get; set; } = -1f;
+    public float FocusedTrackingWidth { get; set; } = 320f;
+    public float FocusedTrackingHeight { get; set; } = 220f;
+
     // Per-character snapshot of Glamour Dresser contents. The game clears its
     // live dresser cache on zone changes, so relying only on ItemFinderModule
     // makes dresser ownership disappear as soon as the player leaves the inn.
     // Key = character ContentId as an invariant string.
     public Dictionary<string, List<uint>> GlamourDresserSnapshots { get; set; } = [];
+}
+
+// Keep the limit in the domain/configuration layer so all future pin insertion
+// paths can share the same invariant. Never truncate existing saved pins.
+public static class PinnedTargetPolicy
+{
+    public const int MaximumPins = 500;
+    public static bool CanAdd(int currentCount) => currentCount < MaximumPins;
 }
 
 [Serializable]
@@ -69,6 +106,26 @@ public sealed class PinnedTargetConfig
 
     // Optional subtype/variant, currently used for a pinned relic set's selected job.
     public string Variant { get; set; } = string.Empty;
+
+    // A sticky pin remains in the priority queue after its goal is completed.
+    // Defaults to false for existing configurations and newly created pins.
+    public bool IsSticky { get; set; } = false;
+
+    // Selected targets participate in the optional, shared Focused Tracking HUD.
+    public bool FocusedTrackingEnabled { get; set; } = false;
+    public string FocusedTrackingId { get; set; } = string.Empty;
+
+    // Minimum one accessible copy is required; higher values set a larger inventory goal.
+    public int DesiredQuantity { get; set; } = 1;
+
+    // Provenance for an automatically guided prerequisite pin.
+    // Empty means an independently pinned target (including all legacy pins).
+    // Never infer this relationship from duplicate targets or matching names.
+    public string PrerequisiteForKind { get; set; } = string.Empty;
+    public uint PrerequisiteForNumericId { get; set; } = 0;
+    // Required for parents identified by a string ID (sets) or a variant.
+    public string PrerequisiteForStringId { get; set; } = string.Empty;
+    public string PrerequisiteForVariant { get; set; } = string.Empty;
 }
 
 // ===== ConfigurationMigrator.cs =====
@@ -153,6 +210,14 @@ public static class ConfigurationMigrator
                 pin.Kind ??= string.Empty;
                 pin.StringId ??= string.Empty;
                 pin.Variant ??= string.Empty;
+                pin.PrerequisiteForKind ??= string.Empty;
+                pin.PrerequisiteForStringId ??= string.Empty;
+                pin.PrerequisiteForVariant ??= string.Empty;
+                if (pin.DesiredQuantity < 1)
+                {
+                    pin.DesiredQuantity = 1;
+                    changed = true;
+                }
                 return pin;
             })
             .ToList();

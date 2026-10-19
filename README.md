@@ -108,3 +108,16 @@ The codebase is intentionally split by responsibility so acquisition rules can b
 For known field-operation locales, CQG distinguishes an inaccessible map from a bad coordinate. If the area is still locked, CQG follows the area's unlock quest prerequisites to the first concrete unmet/current quest and shows who/where to go next. Explicit non-journal gates such as Eureka elemental-level/story requirements are shown alongside the quest step.
 
 Monster acquisition guidance can also show an expandable **Levequest** context when local game data identifies battle leves containing that enemy. This relationship is resolved locally and does not require network enrichment.
+
+Task #6: Undo is protected against immediate re-removal. Item goals become eligible for automatic completion again after their verified current count drops below the goal.
+
+Development Task #10: verified JobUnlock pins transition to JobProgression in the same priority slot when auto-unpin is enabled and the unlock is not Sticky. Existing progression pins are reused, not duplicated. The transition participates in the existing 30-second Undo.
+
+
+### Task #10 local graph audit batch
+
+- Added a read-only, on-demand **Export journal progression graph audit** action under Detailed / Debug / Catalog audits & exports.
+- Graph rows expose family-local vs external prerequisites, successor edges, branch/terminal status, quest locks, and completion flags. These are **candidate relationships only**, not yet a sufficient proof of formal progression.
+- QuestLock null RowRef entries now export as `0` instead of `Lumina.Excel.RowRef...` strings.
+- Existing verified chains remain the only inputs allowed to drive automatic pin transitions. No network requests or per-frame graph building added.
+- Next stage: review graph output and prove optional/intro/variant classification before automatically promoting new families.

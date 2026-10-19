@@ -1,3 +1,0 @@
-CustomQuestGuide_v1.3.7.1.zip
-
-Build the plugin locally in Release configuration, then upload the generated plugin archive with the exact name above to GitHub release tag v1.3.7.1.

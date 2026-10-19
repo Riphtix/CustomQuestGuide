@@ -2,17 +2,17 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.IO;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 
 namespace CustomQuestGuide;
 
 /// <summary>
-/// Builds class/job unlock and formal quest-progression targets from live game
-/// data. The progression graph intentionally follows only quests attributable
-/// to one specific class/job and reachable from that class/job's unlock quest;
-/// it does not attempt to become a leveling, rotation, gearing, role-quest, or
-/// general blue-quest guide.
+/// Discovers classes/jobs and unlock guidance from game data. Formal progression
+/// membership comes ONLY from a validated, bundled quest-ID catalog; the game
+/// quest prerequisite graph is not a trustworthy full progression index.
 /// </summary>
 public sealed class JobProgressionCatalog
 {
@@ -20,8 +20,12 @@ public sealed class JobProgressionCatalog
     private readonly IPluginLog log;
     private readonly Dictionary<uint, JobProgressionTarget> byId = [];
     private readonly Dictionary<uint, QuestNode> quests = [];
-    private readonly Dictionary<uint, uint> singleJobCategoryCache = [];
     private IReadOnlyList<JobIdentity> jobIdentities = Array.Empty<JobIdentity>();
+    private VerifiedJobQuestCatalog? verifiedCatalog;
+    private readonly Dictionary<uint, uint[]> journalGenreJobs = new();
+    private readonly Dictionary<uint, uint[]> journalCandidateQuests = new();
+    private readonly Dictionary<uint, JournalProgressionAnalyzer.Result> journalPathCache = new();
+    private readonly Dictionary<uint, IReadOnlyList<JournalQuestStage>> journalStagesCache = new();
 
     public JobProgressionCatalog(IDataManager data, IPluginLog log)
     {
@@ -81,6 +85,20 @@ public sealed class JobProgressionCatalog
                 .ToArray();
 
             BuildQuestIndex();
+            BuildJournalCandidates();
+            // Manifest is embedded: no runtime file access or network calls.
+            using (var stream = typeof(JobProgressionCatalog).Assembly.GetManifestResourceStream(
+                "CustomQuestGuide.Data.Verified.job-progression.json"))
+            {
+                if (stream != null)
+                {
+                    using var reader = new StreamReader(stream);
+                    verifiedCatalog = new VerifiedJobQuestCatalog(reader.ReadToEnd(),
+                        new HashSet<uint>(quests.Keys), log);
+                }
+                else
+                    log.Warning("Verified job-progression manifest resource missing.");
+            }
 
             foreach (var job in jobIdentities)
             {
@@ -90,14 +108,29 @@ public sealed class JobProgressionCatalog
                     .ThenBy(q => q.RowId)
                     .ToArray();
 
-                var unlock = job.UnlockQuestId != 0 && quests.TryGetValue(job.UnlockQuestId, out var directUnlock)
-                    ? directUnlock
-                    : reverseUnlockRoots.FirstOrDefault();
+                // ARR base classes (including crafting/gathering) can have missing or
+                // misleading unlock links. Use their named guild-introduction quests.
+                // ARR base classes can have multiple reverse ClassJobUnlock links,
+                // including the city-specific starting MSQ ("Close to Home"). That
+                // MSQ does not unlock the class for a character who started elsewhere.
+                // Never select the first reverse link by quest level/row ID.
+                var directUnlock = job.UnlockQuestId != 0 && quests.TryGetValue(job.UnlockQuestId, out var direct)
+                    ? direct : null;
+                // A base class's ClassJob.UnlockQuest can refer to the starting-city
+                // MSQ rather than the guild quest for a later-unlocked class.
+                // Validate ALL base-class candidates by guild quest identity;
+                // do not let the direct relation bypass that validation.
+                var unlock = IsArrBaseClass(job.Abbreviation)
+                    ? SelectBaseClassGuildUnlockQuest(job, directUnlock, reverseUnlockRoots)
+                    : directUnlock ?? SelectReverseUnlockQuest(job, reverseUnlockRoots);
 
-                var unlockRoots = unlock is not null
-                    ? new QuestNode[] { unlock }
-                    : reverseUnlockRoots;
-                var progression = BuildProgression(job.ClassJobId, unlockRoots);
+                // Formal progression is exclusively supplied by a reviewed offline
+                // quest-ID manifest. Never guess membership from class restrictions
+                // or partial prerequisite edges. Missing data means UNKNOWN.
+                var progression = verifiedCatalog is not null &&
+                    verifiedCatalog.TryGetAll(job.ClassJobId, out var ids)
+                    ? ids.Select(id => quests[id]).ToArray()
+                    : Array.Empty<QuestNode>();
 
                 // Keep every real class/job visible. Some base classes or special
                 // jobs can have unusual unlock metadata; an empty progression is
@@ -108,7 +141,7 @@ public sealed class JobProgressionCatalog
                     job.Abbreviation,
                     job.Category,
                     job.ParentClassJobId,
-                    job.UnlockQuestId != 0 && unlock is not null
+                    job.UnlockQuestId != 0 && unlock is not null && unlock.RowId == job.UnlockQuestId
                         ? "ClassJob.UnlockQuest"
                         : unlock is not null
                             ? "Quest.ClassJobUnlock reverse relation"
@@ -131,6 +164,155 @@ public sealed class JobProgressionCatalog
         }
     }
 
+    // Standalone jobs (for example DNC/GNB) also have ParentClassJobId == 0;
+    // never apply the ARR starting-class guild heuristic to those jobs.
+    private static bool IsArrBaseClass(string abbreviation) =>
+        abbreviation is "GLD" or "PGL" or "MRD" or "LNC" or "ARC" or
+            "ROG" or "CNJ" or "THM" or "ACN" ||
+        CraftingJobs.Contains(abbreviation) || GatheringJobs.Contains(abbreviation);
+
+    private QuestNode? SelectBaseClassGuildUnlockQuest(
+        JobIdentity job, QuestNode? directUnlock, IReadOnlyList<QuestNode> reverseCandidates)
+    {
+        // Prefer the guild's introduction, even when the ClassJob row points
+        // directly to an MSQ. Some data revisions omit its reverse relation;
+        // look up the exact guild title in the local quest index in that case.
+        // Restrict fallback by its exact class-specific title, never by level.
+        var candidates = reverseCandidates
+            .Concat(directUnlock is null ? Array.Empty<QuestNode>() : new[] { directUnlock })
+            .Concat(quests.Values.Where(q => IsBaseClassGuildQuestName(q.Name, job.Name)))
+            .DistinctBy(q => q.RowId)
+            .ToArray();
+        return candidates.FirstOrDefault(q => IsBaseClassGuildIntroduction(q.Name, job.Name))
+            ?? candidates.FirstOrDefault(q => IsBaseClassWayQuest(q.Name, job.Name));
+    }
+
+    private static bool IsBaseClassGuildIntroduction(string title, string className) =>
+        title.Equals($"So You Want to Be an {className}", StringComparison.OrdinalIgnoreCase) ||
+        title.Equals($"So You Want to Be a {className}", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBaseClassWayQuest(string title, string className) =>
+        title.Equals($"Way of the {className}", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBaseClassGuildQuestName(string title, string className) =>
+        IsBaseClassGuildIntroduction(title, className) || IsBaseClassWayQuest(title, className);
+
+    private static QuestNode? SelectReverseUnlockQuest(JobIdentity job, IReadOnlyList<QuestNode> candidates) =>
+        candidates.FirstOrDefault();
+
+    // Journal genre is reliable membership evidence, not proof of mandatory progression.
+    // This index is built once from local game data and does not contact any service.
+    public IReadOnlyList<uint> GetJournalCandidates(uint classJobId) =>
+        journalCandidateQuests.TryGetValue(classJobId, out var ids) ? ids : Array.Empty<uint>();
+
+    public IReadOnlyList<uint> GetJournalJobsForGenre(uint genreId) =>
+        journalGenreJobs.TryGetValue(genreId, out var ids) ? ids : Array.Empty<uint>();
+
+    private void BuildJournalCandidates()
+    {
+        var genreNames = new Dictionary<uint, string>();
+        var categorySections = new Dictionary<uint, uint>();
+        var sectionNames = new Dictionary<uint, string>();
+        foreach (var section in data.GetExcelSheet<JournalSection>())
+            sectionNames[section.RowId] = ReflectionUtil.GetPropertyValue(section, "Name")?.ToString()?.Trim() ?? string.Empty;
+        foreach (var category in data.GetExcelSheet<JournalCategory>())
+            categorySections[category.RowId] = ReadRowId(category, "JournalSection", "Section");
+        foreach (var genre in data.GetExcelSheet<JournalGenre>())
+        {
+            var categoryId = ReadRowId(genre, "JournalCategory", "Category");
+            if (!categorySections.TryGetValue(categoryId, out var sectionId) ||
+                !sectionNames.TryGetValue(sectionId, out var sectionName) ||
+                !string.Equals(sectionName, "Class & Job Quests", StringComparison.OrdinalIgnoreCase))
+                continue;
+            genreNames[genre.RowId] = ReflectionUtil.GetPropertyValue(genre, "Name")?.ToString()?.Trim() ?? string.Empty;
+        }
+        foreach (var (genreId, name) in genreNames)
+        {
+            // A localized display-name association is deliberately *not* trusted
+            // for quest completion. Require a unique exact match, no fuzzy search.
+            var matching = jobIdentities.Where(j =>
+                string.Equals(name, j.Name + " Quests", StringComparison.OrdinalIgnoreCase))
+                .Select(j => j.ClassJobId).ToArray();
+            if (matching.Length == 1) journalGenreJobs[genreId] = matching;
+        }
+        var byJob = new Dictionary<uint, List<uint>>();
+        foreach (var quest in data.GetExcelSheet<Quest>())
+        {
+            var genreId = ReadRowId(quest, "JournalGenre", "JournalGenre0");
+            if (!journalGenreJobs.TryGetValue(genreId, out var jobs)) continue;
+            foreach (var jobId in jobs)
+            {
+                if (!byJob.TryGetValue(jobId, out var list))
+                    byJob[jobId] = list = new List<uint>();
+                if (quests.ContainsKey(quest.RowId)) list.Add(quest.RowId);
+            }
+        }
+        foreach (var (jobId, ids) in byJob)
+            journalCandidateQuests[jobId] = ids.Distinct().OrderBy(id => id).ToArray();
+    }
+
+    // Preview-only graph analysis. Deliberately separate from the verified catalog
+    // so candidate paths cannot affect completion, auto-unpin or handoffs.
+    internal JournalProgressionAnalyzer.Result AnalyzeJournalPath(uint classJobId)
+    {
+        if (journalPathCache.TryGetValue(classJobId, out var cached)) return cached;
+        var nodes = GetJournalCandidates(classJobId)
+            .Where(quests.ContainsKey)
+            .Select(id => quests[id])
+            .Select(q => new JournalProgressionAnalyzer.Node(q.RowId, q.Level, q.PreviousQuestIds))
+            .ToArray();
+        var result = JournalProgressionAnalyzer.Analyze(nodes);
+        journalPathCache[classJobId] = result;
+        return result;
+    }
+
+    // Read-only stage preview, deliberately separate from the verified completion pipeline.
+    // Group by journal level and displayed quest title to expose quest ID variants
+    // together instead of pretending every prerequisite graph route is a full chain.
+    // Source membership and completion do not establish mandatory eligibility.
+    internal sealed record JournalQuestVariant(uint QuestId, string Name, ushort Level,
+        IReadOnlyList<uint> PreviousQuestIds, JobQuestStep Step);
+    internal sealed record JournalQuestStage(ushort Level, string Name,
+        IReadOnlyList<JournalQuestVariant> Variants, bool OnTerminalRoute);
+
+    internal IReadOnlyList<JournalQuestStage> GetJournalStages(uint classJobId)
+    {
+        if (journalStagesCache.TryGetValue(classJobId, out var cached)) return cached;
+        var analysis = AnalyzeJournalPath(classJobId);
+        var routeIds = analysis.Routes?.SelectMany(route => route).ToHashSet()
+            ?? new HashSet<uint>();
+        var stages = GetJournalCandidates(classJobId)
+            .Where(quests.ContainsKey)
+            .Select(id => quests[id])
+            .GroupBy(q => (q.Level, q.Name), new JournalStageKeyComparer())
+            .Select(group => new JournalQuestStage(group.Key.Level, group.Key.Name,
+                group.OrderBy(q => q.RowId)
+                    .Select(q => new JournalQuestVariant(q.RowId, q.Name, q.Level,
+                        q.PreviousQuestIds, ToStep(q))).ToArray(),
+                group.Any(q => routeIds.Contains(q.RowId))))
+            .OrderBy(stage => stage.Level)
+            .ThenBy(stage => stage.Variants.Min(v => v.QuestId))
+            .ToArray();
+        journalStagesCache[classJobId] = stages;
+        return stages;
+    }
+
+    private sealed class JournalStageKeyComparer : IEqualityComparer<(ushort Level, string Name)>
+    {
+        public bool Equals((ushort Level, string Name) x, (ushort Level, string Name) y) =>
+            x.Level == y.Level && string.Equals(x.Name, y.Name, StringComparison.OrdinalIgnoreCase);
+        public int GetHashCode((ushort Level, string Name) value) =>
+            HashCode.Combine(value.Level, StringComparer.OrdinalIgnoreCase.GetHashCode(value.Name));
+    }
+
+    internal string? GetJournalQuestName(uint questId) =>
+        quests.TryGetValue(questId, out var q) ? q.Name : null;
+
+    /// <summary>Resolve only validated quest stages applicable to this character.</summary>
+    public IReadOnlyList<uint>? GetVerifiedApplicableQuestIds(uint classJobId, uint firstClassId) =>
+        verifiedCatalog is not null && verifiedCatalog.TryGetApplicable(classJobId, firstClassId, out var ids)
+            ? ids : null;
+
     private void BuildQuestIndex()
     {
         foreach (var quest in data.GetExcelSheet<Quest>())
@@ -149,14 +331,8 @@ public sealed class JobProgressionCatalog
             // ClassJobRequired. Resolve only categories that map to exactly one
             // class/job; role-wide and multi-job categories are deliberately not
             // treated as formal job progression.
-            if (requiredJobId == 0)
-            {
-                var categoryId = ReadRowId(
-                    quest,
-                    "ClassJobCategory0",
-                    "ClassJobCategory");
-                requiredJobId = ResolveSingleJobCategory(categoryId);
-            }
+            var categoryId = ReadRowId(quest, "ClassJobCategory0", "ClassJobCategory");
+            var secondaryCategoryId = ReadRowId(quest, "ClassJobCategory1");
 
             var previousIds = EnumerateRowIds(
                 ReflectionUtil.GetPropertyValue(quest, "PreviousQuest"));
@@ -175,96 +351,11 @@ public sealed class JobProgressionCatalog
                 level,
                 unlockJobId,
                 requiredJobId,
+                categoryId,
+                secondaryCategoryId,
                 previousIds,
                 issuerName,
                 issuerLocation);
-        }
-    }
-
-    private IReadOnlyList<QuestNode> BuildProgression(
-        uint classJobId,
-        IReadOnlyList<QuestNode> unlockRoots)
-    {
-        var candidates = quests.Values
-            .Where(q => q.RequiredClassJobId == classJobId || q.UnlockClassJobId == classJobId)
-            .ToDictionary(q => q.RowId);
-
-        if (candidates.Count == 0)
-            return Array.Empty<QuestNode>();
-
-        var included = new HashSet<uint>();
-        var queue = new Queue<uint>();
-
-        foreach (var root in unlockRoots)
-        {
-            if (!candidates.ContainsKey(root.RowId) || !included.Add(root.RowId))
-                continue;
-            queue.Enqueue(root.RowId);
-        }
-
-        // If the unlock relation is absent, keep only the candidate set and sort
-        // it. This is a schema-resilience fallback; the Debug view will make a
-        // missing unlock quest obvious without hiding the class/job entirely.
-        if (queue.Count == 0)
-        {
-            return candidates.Values
-                .OrderBy(q => q.Level)
-                .ThenBy(q => q.RowId)
-                .ToArray();
-        }
-
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-
-            foreach (var candidate in candidates.Values)
-            {
-                if (included.Contains(candidate.RowId))
-                    continue;
-
-                if (!candidate.PreviousQuestIds.Contains(current))
-                    continue;
-
-                included.Add(candidate.RowId);
-                queue.Enqueue(candidate.RowId);
-            }
-        }
-
-        return included
-            .Select(id => candidates[id])
-            .OrderBy(q => q.Level)
-            .ThenBy(q => q.RowId)
-            .ToArray();
-    }
-
-    private uint ResolveSingleJobCategory(uint categoryId)
-    {
-        if (categoryId == 0)
-            return 0;
-
-        if (singleJobCategoryCache.TryGetValue(categoryId, out var cached))
-            return cached;
-
-        try
-        {
-            var row = data.GetExcelSheet<ClassJobCategory>().GetRow(categoryId);
-            var matching = new List<uint>();
-
-            foreach (var job in jobIdentities)
-            {
-                var raw = ReflectionUtil.GetPropertyValue(row, job.Abbreviation);
-                if (AsBool(raw))
-                    matching.Add(job.ClassJobId);
-            }
-
-            var result = matching.Count == 1 ? matching[0] : 0;
-            singleJobCategoryCache[categoryId] = result;
-            return result;
-        }
-        catch
-        {
-            singleJobCategoryCache[categoryId] = 0;
-            return 0;
         }
     }
 
@@ -467,6 +558,8 @@ public sealed class JobProgressionCatalog
         ushort Level,
         uint UnlockClassJobId,
         uint RequiredClassJobId,
+        uint ClassJobCategoryId,
+        uint SecondaryClassJobCategoryId,
         IReadOnlyList<uint> PreviousQuestIds,
         string? IssuerName,
         string? IssuerLocation);

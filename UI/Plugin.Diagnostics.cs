@@ -176,6 +176,7 @@ public sealed partial class Plugin
         DrawDebugCacheControls();
         DrawDebugTargetTools(selectedResult, selectedSet);
         DrawDebugCatalogAuditTools();
+        DrawLifecycleAuditTools();
         DrawDebugSupplementalTools();
 
         if (!string.IsNullOrWhiteSpace(exportStatus))
@@ -282,40 +283,75 @@ public sealed partial class Plugin
         ImGui.Unindent();
     }
 
+    // Diagnostics are explicit actions, never executed by a selection change or during rendering.
+    private int catalogAuditGroup;
+    private int catalogAuditItem;
+    private int questAuditItem;
+
     private void DrawDebugCatalogAuditTools()
     {
         if (!ImGui.CollapsingHeader("Catalog audits & exports"))
             return;
 
         ImGui.Indent();
-
-        if (ImGui.Button("Export ambiguity audit"))
-            ExportAmbiguityAuditCsv();
-        if (ImGui.IsItemHovered())
+        ImGui.TextDisabled("Select a report, then export. Reports run only when requested.");
+        string[] groups = { "Item & source audits", "Class & job quest audits" };
+        ImGui.SetNextItemWidth(MathF.Min(320f, ImGui.GetContentRegionAvail().X * 0.65f));
+        if (ImGui.Combo("Report group##cqg-audit", ref catalogAuditGroup, groups, groups.Length))
         {
-            ImGui.SetTooltip(
-                "Audits ambiguous/incomplete item resolutions using only local game data and already-cached community data. " +
-                "The audit makes ZERO network calls. Cases that could normally use uncached community enrichment are marked 'missing network data'.");
+            catalogAuditItem = 0;
+            questAuditItem = 0;
         }
 
-        ImGui.SameLine();
-        if (ImGui.Button("Export unresolved CSV"))
-            ExportUnresolvedCsv();
-
-        ImGui.SameLine();
-        if (ImGui.Button("Export resolver audit CSV"))
-            ExportResolverAuditCsv();
-
-        if (ImGui.Button($"Export specificity backlog ({cachedSpecificityEnrichmentCandidates:N0})"))
-            ExportSpecificityBacklogCsv();
-
-        ImGui.SameLine();
-        if (ImGui.Button($"Export exact-source backlog ({cachedExactSpecificityBacklog:N0})"))
-            ExportExactSpecificityBacklogCsv();
-
-        ImGui.SameLine();
-        if (ImGui.Button("Export job progression audit"))
-            ExportJobProgressionAuditCsv();
+        if (catalogAuditGroup == 0)
+        {
+            string[] reports =
+            {
+                "Ambiguity audit", "Unresolved targets", "Resolver audit",
+                $"Specificity backlog ({cachedSpecificityEnrichmentCandidates:N0})",
+                $"Exact-source backlog ({cachedExactSpecificityBacklog:N0})"
+            };
+            ImGui.SetNextItemWidth(MathF.Min(320f, ImGui.GetContentRegionAvail().X * 0.65f));
+            ImGui.Combo("Report##cqg-item-audit", ref catalogAuditItem, reports, reports.Length);
+            if (ImGui.Button("Export selected report##cqg-item-audit"))
+            {
+                switch (catalogAuditItem)
+                {
+                    case 0: ExportAmbiguityAuditCsv(); break;
+                    case 1: ExportUnresolvedCsv(); break;
+                    case 2: ExportResolverAuditCsv(); break;
+                    case 3: ExportSpecificityBacklogCsv(); break;
+                    case 4: ExportExactSpecificityBacklogCsv(); break;
+                }
+            }
+            if (catalogAuditItem == 0 && ImGui.IsItemHovered())
+                ImGui.SetTooltip("Read-only, local/cached source audit; no network requests.");
+        }
+        else
+        {
+            string[] reports =
+            {
+                "Journal paths (summary, decisions, character evidence)",
+                "Job progression state", "Journal classification",
+                "Journal progression graph", "Raw quest flags"
+            };
+            ImGui.SetNextItemWidth(MathF.Min(320f, ImGui.GetContentRegionAvail().X * 0.65f));
+            ImGui.Combo("Report##cqg-quest-audit", ref questAuditItem, reports, reports.Length);
+            if (ImGui.Button("Export selected report##cqg-quest-audit"))
+            {
+                switch (questAuditItem)
+                {
+                    case 0: ExportJournalPathDecisionAudits(); break;
+                    case 1: ExportJobProgressionAuditCsv(); break;
+                    case 2: ExportJournalClassificationAuditCsv(); break;
+                    case 3: ExportJournalProgressionGraphAuditCsv(); break;
+                    case 4: ExportRawQuestFlagAuditCsv(); break;
+                }
+            }
+            ImGui.TextDisabled(questAuditItem == 0
+                ? "Exports 3 reports: summary, per-quest decisions, character evidence."
+                : "Exports one read-only CSV to the plugin configuration directory.");
+        }
 
         ImGui.Unindent();
     }
@@ -671,6 +707,395 @@ public sealed partial class Plugin
         }
     }
 
+    // On-demand-only raw quest flag audit. Does not modify ownership or quest states.
+    private unsafe void ExportRawQuestFlagAuditCsv()
+    {
+        try
+        {
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory,
+                $"CustomQuestGuide-QuestFlags-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.csv");
+            var csv = new StringBuilder();
+            csv.AppendLine("FirstClass ID,ClassJob ID,ClassJob,Class Level,ClassJob Unlocked Live,Quest ID,Quest Name,Quest Role,Applicable,Exclusion Reason,Raw UnlockLink Completed,Raw UnlockLink Sequence1,Raw Quest Accepted,CQG Quest State,Included In Progression");
+            var firstClassId = PlayerStateService.IsLoaded ? PlayerStateService.FirstClass.RowId : 0u;
+            var ui = UIState.Instance();
+            var qm = QuestManager.Instance();
+            foreach (var job in jobCatalog.Jobs)
+            {
+                var applicable = GetApplicableProgression(job);
+                var candidates = new List<(JobQuestStep Quest, string Role)>();
+                candidates.AddRange(job.Progression.Select(q => (q, "Progression")));
+                if (job.UnlockQuest is { } unlockQuest)
+                    candidates.Add((unlockQuest, "Unlock"));
+                var all = candidates.GroupBy(x => x.Quest.QuestId).Select(x => x.First());
+                foreach (var entry in all)
+                {
+                    var quest = entry.Quest;
+                    var id = quest.QuestId;
+                    var included = applicable.Any(x => x.QuestId == id);
+                    // Diagnostics report catalog membership only; do not reintroduce
+                    // removed name-based or class-specific quest classification rules.
+                    var reason = included ? "" : entry.Role == "Unlock"
+                        ? "Unlock tracked separately"
+                        : "Not in applicable verified progression catalog";
+                    var link = 0x10000u + id;
+                    var completed = ui != null && id != 0 && ui->IsUnlockLinkUnlockedOrQuestCompleted(link);
+                    var seq = ui != null && id != 0 && ui->IsUnlockLinkUnlockedOrQuestCompleted(link, 1);
+                    var accepted = qm != null && id != 0 && id <= ushort.MaxValue && qm->IsQuestAccepted((ushort)id);
+                    var cells = new[] {
+                        firstClassId.ToString(), job.ClassJobId.ToString(), job.Name,
+                        ownership.GetLiveClassJobLevel(job.ClassJobId).ToString(),
+                        ownership.IsJobCurrentlyUnlocked(job.ClassJobId).ToString(),
+                        id.ToString(), quest.Name, entry.Role,
+                        included.ToString(), reason,
+                        ui is null ? "Unavailable" : completed.ToString(),
+                        ui is null ? "Unavailable" : seq.ToString(),
+                        qm is null ? "Unavailable" : accepted.ToString(),
+                        GetQuestStateByRowId(id).ToString(), included.ToString()
+                    };
+                    csv.AppendLine(string.Join(",", cells.Select(Csv)));
+                }
+            }
+            File.WriteAllText(path, csv.ToString(), new UTF8Encoding(true));
+            exportStatus = $"Exported raw quest flag diagnostics to:\n{path}";
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Raw quest flag audit failed: {ex.Message}";
+            Log.Error(ex, "Failed to export raw quest flag audit.");
+        }
+    }
+
+    // Read-only, user-invoked diagnostic. Does not affect progression or run during Draw().
+    // Preserve raw journal IDs even if a game patch changes relationships or field names.
+    private void ExportJournalClassificationAuditCsv()
+    {
+        try
+        {
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory,
+                $"CustomQuestGuide-JournalClassificationAudit-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.csv");
+
+            var genreNames = new Dictionary<uint, (uint CategoryId, string Name)>();
+            var categoryNames = new Dictionary<uint, (uint SectionId, string Name)>();
+            var sectionNames = new Dictionary<uint, string>();
+
+            foreach (var section in DataManager.GetExcelSheet<JournalSection>())
+                sectionNames[section.RowId] = JournalAuditText(section, "Name", "Title");
+
+            foreach (var category in DataManager.GetExcelSheet<JournalCategory>())
+                categoryNames[category.RowId] = (
+                    JournalAuditRowId(category, "JournalSection", "Section"),
+                    JournalAuditText(category, "Name", "Title"));
+
+            foreach (var genre in DataManager.GetExcelSheet<JournalGenre>())
+                genreNames[genre.RowId] = (
+                    JournalAuditRowId(genre, "JournalCategory", "Category"),
+                    JournalAuditText(genre, "Name", "Title"));
+
+            var csv = new StringBuilder();
+            csv.AppendLine("Quest ID,Quest Name,Journal Genre ID,Journal Genre,Journal Category ID,Journal Category,Journal Section ID,Journal Section,Required Job ID,Unlock Job ID,Required Level,Previous Quest IDs,Previous Quest Join,Quest Lock,Completed,Journal Family Candidates");
+            foreach (var quest in DataManager.GetExcelSheet<Quest>())
+            {
+                if (quest.RowId == 0)
+                    continue;
+
+                var genreId = JournalAuditRowId(quest, "JournalGenre", "JournalGenre0");
+                genreNames.TryGetValue(genreId, out var genre);
+                categoryNames.TryGetValue(genre.CategoryId, out var category);
+                sectionNames.TryGetValue(category.SectionId, out var sectionName);
+                var prev = ReflectionUtil.GetPropertyValue(quest, "PreviousQuest");
+                var previousIds = new List<string>();
+                if (prev is System.Collections.IEnumerable sequence && prev is not string)
+                {
+                    foreach (var entry in sequence)
+                    {
+                        var id = ReflectionUtil.ExtractRowId(entry);
+                        if (id != 0)
+                            previousIds.Add(id.ToString());
+                    }
+                }
+
+                string[] fields =
+                [
+                    quest.RowId.ToString(), quest.Name.ExtractText(),
+                    genreId.ToString(), genre.Name ?? "", genre.CategoryId.ToString(),
+                    category.Name ?? "", category.SectionId.ToString(), sectionName ?? "",
+                    JournalAuditRowId(quest, "ClassJobRequired").ToString(),
+                    JournalAuditRowId(quest, "ClassJobUnlock").ToString(),
+                    JournalAuditCollection(quest, "ClassJobLevel"),
+                    string.Join(" | ", previousIds),
+                    JournalAuditText(quest, "PreviousQuestJoin"),
+                    JournalAuditCollection(quest, "QuestLock"),
+                    GetQuestStateByRowId(quest.RowId).ToString(),
+                    string.Join(" | ", jobCatalog.GetJournalJobsForGenre(genreId).Select(j => j.ToString()))
+                ];
+                csv.AppendLine(string.Join(",", fields.Select(Csv)));
+            }
+
+            File.WriteAllText(path, csv.ToString(), new UTF8Encoding(true));
+            exportStatus = $"Journal classification audit exported: {path}";
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Journal classification audit failed: {ex.Message}";
+            Log.Error(ex, "Failed to export journal classification audit.");
+        }
+    }
+
+    // Observational graph inspection only. Candidate membership is not equivalent to
+    // verified mandatory progression, so no gameplay handoffs depend on this export.
+    private void ExportJournalProgressionGraphAuditCsv()
+    {
+        try
+        {
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory,
+                $"CustomQuestGuide-JournalProgressionGraphAudit-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.csv");
+            var csv = new StringBuilder();
+            csv.AppendLine("ClassJob ID,ClassJob Name,Quest ID,Quest Name,Level,Previous IDs,Internal Prerequisite IDs,External Prerequisite IDs,Internal Successor IDs,Internal Successor Count,Is Family Terminal,Is Family Root,Quest Lock IDs,Previous Join,Completion State,Verification");
+            foreach (var job in jobCatalog.Jobs)
+            {
+                var ids = jobCatalog.GetJournalCandidates(job.ClassJobId).ToHashSet();
+                if (ids.Count == 0) continue;
+                var questRows = new Dictionary<uint, Quest>();
+                foreach (var id in ids)
+                {
+                    try { questRows[id] = DataManager.GetExcelSheet<Quest>().GetRow(id); }
+                    catch { /* Preserve explicit missing rows in audit as absent. */ }
+                }
+                var previous = questRows.ToDictionary(kv => kv.Key, kv =>
+                {
+                    var items = new List<uint>();
+                    var raw = ReflectionUtil.GetPropertyValue(kv.Value, "PreviousQuest");
+                    if (raw is System.Collections.IEnumerable seq && raw is not string)
+                        foreach (var item in seq)
+                        {
+                            var value = ReflectionUtil.ExtractRowId(item);
+                            if (value != 0) items.Add(value);
+                        }
+                    return items.Distinct().ToArray();
+                });
+                var successors = ids.ToDictionary(id => id, _ => new List<uint>());
+                foreach (var (questId, predecessors) in previous)
+                    foreach (var prior in predecessors)
+                        if (successors.TryGetValue(prior, out var list)) list.Add(questId);
+                foreach (var (id, quest) in questRows.OrderBy(kv => kv.Key))
+                {
+                    var prereqs = previous[id];
+                    var internalIds = prereqs.Where(ids.Contains).ToArray();
+                    var externalIds = prereqs.Where(q => !ids.Contains(q)).ToArray();
+                    var children = successors[id].OrderBy(x => x).ToArray();
+                    var fields = new[] {
+                        job.ClassJobId.ToString(), job.Name, id.ToString(), quest.Name.ExtractText(),
+                        JournalAuditCollection(quest, "ClassJobLevel"),
+                        string.Join(" | ", prereqs), string.Join(" | ", internalIds),
+                        string.Join(" | ", externalIds), string.Join(" | ", children),
+                        children.Length.ToString(), (children.Length == 0).ToString(),
+                        (internalIds.Length == 0).ToString(),
+                        JournalAuditCollection(quest, "QuestLock"),
+                        JournalAuditText(quest, "PreviousQuestJoin"),
+                        GetQuestStateByRowId(id).ToString(), "CANDIDATE_ONLY"
+                    };
+                    csv.AppendLine(string.Join(",", fields.Select(Csv)));
+                }
+            }
+            File.WriteAllText(path, csv.ToString(), new UTF8Encoding(true));
+            exportStatus = $"Journal progression graph audit exported: {path}";
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Journal progression graph audit failed: {ex.Message}";
+            Log.Error(ex, "Failed to export journal progression graph audit.");
+        }
+    }
+
+    // Export the *actual* preview analyzer results, not a second copy of the raw graph.
+    // This is diagnostics only: it never changes the verified catalog or gameplay state.
+    private void ExportJournalPathDecisionAudits()
+    {
+        try
+        {
+            var directory = PluginInterface.GetPluginConfigDirectory();
+            Directory.CreateDirectory(directory);
+            var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss", CultureInfo.InvariantCulture);
+            var summaryPath = Path.Combine(directory, $"CustomQuestGuide-JournalPathSummary-{timestamp}.csv");
+            var detailPath = Path.Combine(directory, $"CustomQuestGuide-JournalPathDecisions-{timestamp}.csv");
+            var evidencePath = Path.Combine(directory, $"CustomQuestGuide-JournalCharacterEvidence-{timestamp}.csv");
+            var evidence = new StringBuilder();
+            evidence.AppendLine("ClassJob ID,ClassJob,FirstClass ID,Unlock Quest ID,Unlock Quest State,Structural Status,Structural Routes,Completed Variant IDs,Observed Route Status,Compatible Routes,Observed Route IDs,Observed Detail,Verified Applicable Count,Quest ID,Quest Name,Quest State,In Verified Chain,In Observed Route,In Representative Route,Classification,Reason");
+            var summary = new StringBuilder();
+            var detail = new StringBuilder();
+            summary.AppendLine("ClassJob ID,ClassJob,FirstClass ID,Candidate Count,Analyzer Status,Analyzer Detail,Proposed Count,Proposed Quest IDs,Off Path Count,Off Path Quest IDs,Verified Catalog Available,Verified Applicable IDs,Proposed vs Verified,Promotion Allowed,Route Count,Shared Quest IDs,Route-Specific Quest IDs");
+            detail.AppendLine("ClassJob ID,ClassJob,Quest ID,Quest Name,Level,Decision,Path Position,Analyzer Status,Internal Prerequisite IDs,External Prerequisite IDs,Internal Successor IDs,Quest Lock IDs,Previous Join,Completion State,Verified Applicable,Reason");
+            var firstClass = PlayerStateService.IsLoaded ? PlayerStateService.FirstClass.RowId : 0u;
+            var sheet = DataManager.GetExcelSheet<Quest>();
+            foreach (var job in jobCatalog.Jobs)
+            {
+                var candidates = jobCatalog.GetJournalCandidates(job.ClassJobId).Distinct().OrderBy(id => id).ToArray();
+                var result = jobCatalog.AnalyzeJournalPath(job.ClassJobId);
+                var proposed = result.ProposedPath.ToArray();
+                var pathOrder = proposed.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i + 1);
+                var offPath = result.OffPath.ToHashSet();
+                var candidateSet = candidates.ToHashSet();
+                var verified = jobCatalog.GetVerifiedApplicableQuestIds(job.ClassJobId, firstClass);
+                var verifiedSet = verified?.ToHashSet();
+                var completedIds = candidates.Where(IsQuestCompleteByRowId).ToHashSet();
+                var observation = JournalProgressionAnalyzer.CompareCompletedRoutes(result, completedIds);
+                var unlockId = job.UnlockQuest?.QuestId ?? 0u;
+                var unlockState = unlockId == 0 ? "Unknown" : GetQuestStateByRowId(unlockId).ToString();
+                var variantIds = (result.AlternativeQuestIds ?? Array.Empty<uint>()).ToHashSet();
+                foreach (var id in candidates)
+                {
+                    var isVerified = verifiedSet?.Contains(id) == true;
+                    var isObserved = observation.Route.Contains(id);
+                    var isRepresentative = proposed.Contains(id);
+                    var isUnlock = id == unlockId;
+                    var classification = isUnlock ? "UnlockQuest" :
+                        isVerified ? "VerifiedFormalQuest" :
+                        verifiedSet is not null ? "NotInVerifiedApplicableChain" :
+                        variantIds.Contains(id) ? "AlternativeCandidate" :
+                        result.OffPath.Contains(id) ? "OffMainRouteCandidate" : "UnverifiedCandidate";
+                    var reason = isUnlock ? "Explicit resolved unlock quest; not automatically counted as formal progression" :
+                        isVerified ? "Present in existing reviewed, character-applicable catalog" :
+                        verifiedSet is not null ? "Absent from reviewed character-applicable catalog; not proof of optionality" :
+                        variantIds.Contains(id) ? "Membership varies by structural route; inspect eligibility and prerequisite joins" :
+                        result.OffPath.Contains(id) ? "Outside paths to selected endpoint; optionality not proven" :
+                        "Journal-family membership only; mandatory status unknown";
+                    var cells = new[] { job.ClassJobId.ToString(), job.Name, firstClass.ToString(),
+                        unlockId.ToString(), unlockState, result.Status, result.RouteCount.ToString(),
+                        string.Join(" | ", completedIds.Where(variantIds.Contains).OrderBy(x => x)),
+                        observation.Status, observation.CompatibleCount.ToString(),
+                        string.Join(" | ", observation.Route), observation.Detail,
+                        verified?.Count.ToString() ?? "Unknown", id.ToString(),
+                        jobCatalog.GetJournalQuestName(id) ?? $"Quest #{id}",
+                        GetQuestStateByRowId(id).ToString(),
+                        verifiedSet is null ? "Unknown" : isVerified.ToString(),
+                        isObserved.ToString(), isRepresentative.ToString(), classification, reason };
+                    evidence.AppendLine(string.Join(",", cells.Select(Csv)));
+                }
+                var comparison = verified is null ? "No verified applicable chain" :
+                    proposed.SequenceEqual(verified) ? "Exact ordered match" :
+                    proposed.ToHashSet().SetEquals(verified) ? "Same members; different order" :
+                    $"Different members (preview-only: {proposed.Except(verified).Count()}, verified-only: {verified.Except(proposed).Count()})";
+                var summ = new[] {
+                    job.ClassJobId.ToString(), job.Name, firstClass.ToString(), candidates.Length.ToString(),
+                    result.Status, result.Detail, proposed.Length.ToString(), string.Join(" | ", proposed),
+                    offPath.Count.ToString(), string.Join(" | ", result.OffPath),
+                    (verified is not null).ToString(), verified is null ? "" : string.Join(" | ", verified),
+                    comparison, "False (diagnostic only)", result.RouteCount.ToString(),
+                    string.Join(" | ", result.CommonPath ?? Array.Empty<uint>()),
+                    string.Join(" | ", result.AlternativeQuestIds ?? Array.Empty<uint>())
+                };
+                summary.AppendLine(string.Join(",", summ.Select(Csv)));
+
+                // Reconstruct only the local relations necessary to explain each decision.
+                var rows = new Dictionary<uint, Quest>();
+                foreach (var id in candidates)
+                {
+                    try { rows[id] = sheet.GetRow(id); }
+                    catch { /* Missing rows remain visible in the report. */ }
+                }
+                var previous = rows.ToDictionary(pair => pair.Key, pair =>
+                {
+                    var prior = new List<uint>();
+                    var value = ReflectionUtil.GetPropertyValue(pair.Value, "PreviousQuest");
+                    if (value is System.Collections.IEnumerable sequence && value is not string)
+                        foreach (var item in sequence)
+                        {
+                            var id = ReflectionUtil.ExtractRowId(item);
+                            if (id != 0) prior.Add(id);
+                        }
+                    return prior.Distinct().ToArray();
+                });
+                var successors = candidates.ToDictionary(id => id, _ => new List<uint>());
+                foreach (var (id, parents) in previous)
+                    foreach (var parent in parents)
+                        if (successors.TryGetValue(parent, out var children)) children.Add(id);
+                foreach (var id in candidates)
+                {
+                    var found = rows.TryGetValue(id, out var quest);
+                    var parents = previous.TryGetValue(id, out var refs) ? refs : Array.Empty<uint>();
+                    var internalParents = parents.Where(candidateSet.Contains).ToArray();
+                    var externalParents = parents.Where(p => !candidateSet.Contains(p)).ToArray();
+                    var children = successors[id].Distinct().OrderBy(x => x).ToArray();
+                    var included = pathOrder.TryGetValue(id, out var position);
+                    var decision = !found ? "MissingGameData" : included ? "ProposedPath" :
+                        offPath.Contains(id) ? "OffProposedPath" : "Unclassified";
+                    var reason = !found ? "Quest row unavailable" :
+                        result.Status != "ProposedOnly" && result.Status != "AlternativeRoutes" ? $"Global analyzer blocker: {result.Detail}" :
+                        included ? "Representative structural route; not verified as character-applicable or mandatory" :
+                        (result.AlternativeQuestIds?.Contains(id) == true ? "On another prerequisite route; not character-verified" :
+                         "Outside all routes to selected endpoint; could be introduction, optional branch, or unresolved dependency");
+                    var cells = new[] {
+                        job.ClassJobId.ToString(), job.Name, id.ToString(),
+                        found ? quest.Name.ExtractText() : "[missing quest row]",
+                        found ? JournalAuditCollection(quest, "ClassJobLevel") : "",
+                        decision, included ? position.ToString() : "", result.Status,
+                        string.Join(" | ", internalParents), string.Join(" | ", externalParents),
+                        string.Join(" | ", children),
+                        found ? JournalAuditCollection(quest, "QuestLock") : "",
+                        found ? JournalAuditText(quest, "PreviousQuestJoin") : "",
+                        found ? GetQuestStateByRowId(id).ToString() : "Unknown",
+                        verifiedSet is null ? "Unknown" : verifiedSet.Contains(id).ToString(), reason
+                    };
+                    detail.AppendLine(string.Join(",", cells.Select(Csv)));
+                }
+            }
+            File.WriteAllText(evidencePath, evidence.ToString(), new UTF8Encoding(true));
+            File.WriteAllText(summaryPath, summary.ToString(), new UTF8Encoding(true));
+            File.WriteAllText(detailPath, detail.ToString(), new UTF8Encoding(true));
+            exportStatus = $"Journal path audits exported: {summaryPath}, {detailPath}, {evidencePath}";
+        }
+        catch (Exception ex)
+        {
+            exportStatus = $"Journal path audits failed: {ex.Message}";
+            Log.Error(ex, "Failed to export journal path decision audits.");
+        }
+    }
+
+    // Dump the actual scalar/RowRef values instead of Collection<T>.ToString().
+    private static string JournalAuditCollection(object row, string property)
+    {
+        var value = ReflectionUtil.GetPropertyValue(row, property);
+        if (value is not System.Collections.IEnumerable sequence || value is string)
+            return value?.ToString() ?? string.Empty;
+        var parts = new List<string>();
+        foreach (var entry in sequence)
+        {
+            if (entry is null) continue;
+            var id = ReflectionUtil.ExtractRowId(entry);
+            if (id != 0) parts.Add(id.ToString());
+            else if (entry.GetType().Name.Contains("RowRef", StringComparison.Ordinal)) parts.Add("0");
+            else parts.Add(Convert.ToString(entry, CultureInfo.InvariantCulture) ?? string.Empty);
+        }
+        return string.Join(" | ", parts);
+    }
+
+    private static uint JournalAuditRowId(object row, params string[] names)
+    {
+        var id = ReflectionUtil.GetNestedRowId(row, names);
+        if (id != 0)
+            return id;
+        var value = ReflectionUtil.GetNumericProperty(row, names);
+        return value is >= 0 and <= uint.MaxValue ? (uint)value.Value : 0;
+    }
+
+    private static string JournalAuditText(object row, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var value = ReflectionUtil.GetPropertyValue(row, name);
+            if (value is null)
+                continue;
+            return value.ToString() ?? string.Empty;
+        }
+        return string.Empty;
+    }
+
     private void ExportJobProgressionAuditCsv()
     {
         try
@@ -684,22 +1109,15 @@ public sealed partial class Plugin
 
             var csv = new StringBuilder();
             csv.AppendLine(
-                "ClassJob ID,Name,Abbreviation,Category,Parent ClassJob ID,Unlock Resolution,ClassJob UnlockQuest ID,Resolved Unlock Quest ID,Resolved Unlock Quest,Unlock Quest Giver,Unlock Location,Unlock State,Formal Quest Count,Formal Effective Complete Count,Current/Next State,Current/Next Quest ID,Current/Next Quest,Current/Next Quest Giver,Current/Next Location");
+                "ClassJob ID,Name,Abbreviation,Category,Parent ClassJob ID,Unlock Resolution,ClassJob UnlockQuest ID,Resolved Unlock Quest ID,Resolved Unlock Quest,Unlock Quest Giver,Unlock Location,Unlock State,Formal Quest Count,Formal Effective Complete Count,Current/Next State,Current/Next Quest ID,Current/Next Quest,Current/Next Quest Giver,Current/Next Location,Live Unlocked,Starting Class ID,Excluded Quest IDs and Reasons");
 
             foreach (var job in jobCatalog.Jobs)
             {
                 var unlockState = job.UnlockQuest is null
                     ? QuestProgressState.NotStarted
                     : GetQuestStateByRowId(job.UnlockQuest.QuestId);
-                var progression = ResolveJobQuestSequence(job.Progression);
-                var completed = progression.Entries.Count(x =>
-                    x.EffectiveState == QuestProgressState.Completed);
-                var nextEntry = progression.CurrentOrNext;
-                var next = nextEntry?.Info is { } nextInfo
-                    ? job.Progression.FirstOrDefault(x => x.QuestId == nextInfo.QuestId)
-                    : nextEntry is not null
-                        ? job.Progression.FirstOrDefault(x => x.Name.Equals(nextEntry.Name, StringComparison.OrdinalIgnoreCase))
-                        : null;
+                var completed = CountConfirmedProgressionQuests(job);
+                var next = GetNextConfirmedProgressionQuest(job);
 
                 csv.Append(Csv(job.ClassJobId.ToString()));
                 csv.Append(',');
@@ -725,11 +1143,11 @@ public sealed partial class Plugin
                 csv.Append(',');
                 csv.Append(Csv(job.UnlockQuest is null ? "Unknown" : unlockState.ToString()));
                 csv.Append(',');
-                csv.Append(Csv(job.Progression.Count.ToString()));
+                csv.Append(Csv(GetApplicableProgression(job).Count.ToString()));
                 csv.Append(',');
                 csv.Append(Csv(completed.ToString()));
                 csv.Append(',');
-                csv.Append(Csv(nextEntry?.RawState.ToString() ?? string.Empty));
+                csv.Append(Csv(next is null ? string.Empty : GetQuestStateByRowId(next.QuestId).ToString()));
                 csv.Append(',');
                 csv.Append(Csv(next?.QuestId.ToString() ?? string.Empty));
                 csv.Append(',');
@@ -738,6 +1156,14 @@ public sealed partial class Plugin
                 csv.Append(Csv(next?.QuestGiver ?? string.Empty));
                 csv.Append(',');
                 csv.Append(Csv(next?.Location ?? string.Empty));
+                csv.Append(',');
+                csv.Append(Csv(ClientState.IsLoggedIn ? ownership.IsJobCurrentlyUnlocked(job.ClassJobId).ToString() : "Unavailable"));
+                csv.Append(',');
+                csv.Append(Csv(PlayerStateService.IsLoaded ? PlayerStateService.FirstClass.RowId.ToString() : "Unavailable"));
+                csv.Append(',');
+                csv.Append(Csv(string.Join(" | ", GetClassifiedProgression(job)
+                    .Where(x => x.Role != ClassQuestRole.ApplicableProgression)
+                    .Select(x => $"{x.Step.QuestId}:{x.Role}:{x.Reason}"))));
                 csv.AppendLine();
             }
 

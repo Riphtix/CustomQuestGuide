@@ -482,3 +482,12 @@ When a monster coordinate belongs to a conservatively cataloged special area who
 - Treasure-map instances must be classified and displayed as `Treasure Dungeon`, never the generic `Duty` label.
 - Canonical player-facing formatting is `Treasure Dungeon: <Name> - Lv. <required level>`.
 - This classification must flow through the shared `DutyTarget.DisplayLabel` so Duties, item dependencies, pins, Run guidance, and other duty surfaces stay consistent.
+
+
+## v1.4.0.0 development — pin capacity (task 1)
+- Maximum of 500 pinned targets. The existing saved list must never be truncated during migration.
+- Show `current / 500` at the top of Pinned Targets and in the main tab label.
+- Disable new Pin actions once the cap is reached, with an explanatory tooltip; existing pins remain removable.
+- The limit counts each actual pin entry, including variants, not target quantity goals.
+- Enforcement is centralized through the existing DrawPinToggle insertion path; future programmatic insertion paths must use the same policy.
+- This change must not add per-frame ownership scans, additional network requests, or background polling.

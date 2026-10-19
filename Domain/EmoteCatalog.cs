@@ -69,8 +69,24 @@ public sealed class EmoteCatalog
         PollingComplete = true;
     }
 
+    private readonly Dictionary<ushort, bool> focusedUnlocks = [];
+
+    public unsafe void RefreshFocusedUnlocks(IEnumerable<ushort> emoteIds)
+    {
+        focusedUnlocks.Clear();
+        var ui = UIState.Instance();
+        if (ui == null) return;
+        foreach (var id in emoteIds.Where(id => id != 0).Distinct())
+        {
+            try { focusedUnlocks[id] = ui->IsEmoteUnlocked(id); }
+            catch { /* Unavailable game state: retain unknown. */ }
+        }
+    }
+
     public bool? IsUnlocked(ushort emoteId)
     {
+        if (focusedUnlocks.TryGetValue(emoteId, out var focused))
+            return focused;
         if (!HasOwnershipSnapshot || emoteId == 0)
             return null;
         return unlockedSnapshot.Contains(emoteId);

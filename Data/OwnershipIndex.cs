@@ -53,6 +53,11 @@ public sealed class OwnershipIndex
     private readonly HashSet<uint> armoireItems = [];
     private readonly Dictionary<uint, OwnershipStatus> ownershipSnapshot = [];
     private readonly Dictionary<uint, bool> jobUnlockSnapshot = [];
+    // Build once from local game sheets; no item-name lookup or sheet walk on events.
+    private readonly Dictionary<uint, uint> soulCrystalByJob = [];
+    private readonly HashSet<uint> advancedJobs = [];
+    private readonly Dictionary<uint, uint> jobBySoulCrystal = [];
+
     private bool hasSnapshot;
     private uint[] activePermanentCandidates = Array.Empty<uint>();
     private int permanentCandidateCursor;
@@ -81,6 +86,8 @@ public sealed class OwnershipIndex
         knownNonUnlockableItemActions.Clear();
         ownershipSnapshot.Clear();
         jobUnlockSnapshot.Clear();
+        focusedJobUnlocks.Clear();
+        focusedItemOwnership.Clear();
         snapshotContentId = 0;
         hasSnapshot = false;
 
@@ -157,14 +164,160 @@ public sealed class OwnershipIndex
         this.saveConfig = saveConfig;
         this.log = log;
         BuildStaticMaps();
+        BuildSoulCrystalMap();
+    }
+
+    // ARR base classes (combat, crafting, gathering) and Rogue are classes, not
+    // soul-crystal jobs. Crafter specialization items are also named "Soul of the
+    // <class>", so item-name matching alone would incorrectly classify them as jobs.
+    // These are stable ClassJob row identities, not a quest or level-based guess.
+    private static bool IsBaseClass(uint classJobId) =>
+        (classJobId >= 1 && classJobId <= 18) || classJobId == 29;
+
+    private void BuildSoulCrystalMap()
+    {
+        try
+        {
+            var jobs = data.GetExcelSheet<ClassJob>();
+            var crystals = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in data.GetExcelSheet<Item>())
+            {
+                var name = item.Name.ExtractText().Trim();
+                if (name.StartsWith("Soul of the ", StringComparison.OrdinalIgnoreCase))
+                    crystals.TryAdd(name[12..], item.RowId);
+            }
+            foreach (var job in jobs)
+            {
+                if (IsBaseClass(job.RowId))
+                    continue;
+                var name = job.Name.ExtractText().Trim();
+                // Soul-crystal metadata, not a shared class level or quest, defines
+                // whether this entry is a job. This includes expansion jobs whose
+                // ClassJobParent field is empty or references themselves.
+                if (!crystals.TryGetValue(name, out var itemId))
+                    continue;
+                advancedJobs.Add(job.RowId);
+                soulCrystalByJob[job.RowId] = itemId;
+                jobBySoulCrystal[itemId] = job.RowId;
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Could not build soul crystal ownership map.");
+        }
+    }
+
+    public bool TryGetJobForSoulCrystal(uint itemId, out uint classJobId) =>
+        jobBySoulCrystal.TryGetValue(itemId, out classJobId);
+
+    /// <summary>For an advanced ARR job, only the matching owned soul crystal proves unlock.</summary>
+    public bool IsDerivedJobSoulCrystalOwned(uint classJobId)
+    {
+        if (!soulCrystalByJob.TryGetValue(classJobId, out var itemId))
+            return false; // Missing mapping must never infer unlock from shared class levels.
+        return CountPhysicallyPresentNow(itemId) > 0;
     }
 
     /// <summary>
     /// Returns the job-unlock state captured by the most recent command-triggered
     /// polling sample. This method never reads live client state.
     /// </summary>
+    // A focused HUD may be active before /cqg has taken its one-shot snapshot.
+    // Only the explicitly focused class/job IDs receive these targeted readings.
+    private readonly Dictionary<uint, bool> focusedJobUnlocks = [];
+    private readonly Dictionary<uint, OwnershipStatus> focusedItemOwnership = [];
+
+    // Bounded, on-demand sampling for focused item targets. This does not
+    // start permanent catalog polling or modify Glamour Dresser snapshots.
+    public void RefreshFocusedItemOwnership(IEnumerable<uint> itemIds)
+    {
+        var requested = itemIds.Where(id => id != 0).Distinct().ToArray();
+        var allowed = requested.ToHashSet();
+        foreach (var stale in focusedItemOwnership.Keys.Where(id => !allowed.Contains(id)).ToArray())
+            focusedItemOwnership.Remove(stale);
+        if (!playerState.IsLoaded)
+        {
+            focusedItemOwnership.Clear();
+            return;
+        }
+        foreach (var id in requested)
+        {
+            var permanent = GetPermanentUnlockStatus(id).Status;
+            focusedItemOwnership[id] = permanent.IsOwned ? permanent
+                : CountPhysicallyPresentNow(id) > 0 ? new OwnershipStatus(true, "Inventory / Armoury / Saddlebag / Retainer")
+                : hasSnapshot && glamourItems.Contains(id) ? new OwnershipStatus(true, "Glamour Dresser")
+                : hasSnapshot && armoireItems.Contains(id) ? new OwnershipStatus(true, "Armoire")
+                : OwnershipStatus.Missing;
+        }
+    }
+
+
+    public void RefreshFocusedJobUnlocks(IEnumerable<uint> classJobIds)
+    {
+        var requested = classJobIds.Where(id => id != 0).Distinct().Take(3).ToArray();
+        var allowed = requested.ToHashSet();
+        foreach (var stale in focusedJobUnlocks.Keys.Where(id => !allowed.Contains(id)).ToArray())
+            focusedJobUnlocks.Remove(stale);
+        if (!playerState.IsLoaded)
+        {
+            focusedJobUnlocks.Clear();
+            return;
+        }
+        foreach (var id in requested)
+            focusedJobUnlocks[id] = IsJobCurrentlyUnlocked(id);
+    }
+
     public bool IsJobUnlocked(uint classJobId) =>
-        hasSnapshot && jobUnlockSnapshot.TryGetValue(classJobId, out var unlocked) && unlocked;
+        focusedJobUnlocks.TryGetValue(classJobId, out var focused)
+            ? focused
+            : hasSnapshot && jobUnlockSnapshot.TryGetValue(classJobId, out var unlocked) && unlocked;
+
+    // Prefer Dalamud's supported class-level API over an unmanaged signature lookup.
+    // This is evaluated only when capturing a one-shot snapshot or explicitly
+    // handling a character-state event; it is never polled during rendering.
+    private int ReadClassJobLevel(uint classJobId)
+    {
+        if (classJobId == 0 || !playerState.IsLoaded)
+            return 0;
+        try
+        {
+            var classJob = data.GetExcelSheet<ClassJob>().GetRow(classJobId);
+            return Math.Max(0, (int)playerState.GetClassJobLevel(classJob));
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, $"Dalamud class level lookup failed for {classJobId}.");
+            return 0;
+        }
+    }
+
+    /// <summary>One-off verification after a relevant game event, not a background scan.</summary>
+    public unsafe bool IsJobCurrentlyUnlocked(uint classJobId)
+    {
+        if (classJobId == 0) return false;
+        if (IsBaseClass(classJobId))
+            return ReadClassJobLevel(classJobId) >= 1;
+        if (advancedJobs.Contains(classJobId))
+            return IsDerivedJobSoulCrystalOwned(classJobId);
+        return ReadClassJobLevel(classJobId) >= 1;
+    }
+
+    public int GetLiveClassJobLevel(uint classJobId) => ReadClassJobLevel(classJobId);
+
+    /// <summary>Only rendered when the user explicitly opens the Debug section.</summary>
+    public unsafe string GetClassJobUnlockDiagnostics(uint classJobId)
+    {
+        var native = PlayerState.Instance();
+        var nativeLevel = native != null && native->IsLoaded
+            ? native->GetClassJobLevel((int)classJobId, false).ToString()
+            : "unavailable";
+        return $"Dalamud level: {ReadClassJobLevel(classJobId)}; " +
+               $"Native level: {nativeLevel}; " +
+               $"Base class: {IsBaseClass(classJobId)}; " +
+               $"Soul-crystal job: {advancedJobs.Contains(classJobId)}; " +
+               $"Snapshot captured: {hasSnapshot}; " +
+               $"Snapshot entry present: {jobUnlockSnapshot.ContainsKey(classJobId)}";
+    }
 
     /// <summary>
     /// Returns ownership from the most recent command-triggered one-shot scan.
@@ -172,6 +325,8 @@ public sealed class OwnershipIndex
     /// </summary>
     public OwnershipStatus GetItemStatus(uint itemId)
     {
+        if (focusedItemOwnership.TryGetValue(itemId, out var focused))
+            return focused;
         if (itemId == 0 || !hasSnapshot)
             return OwnershipStatus.Missing;
 
@@ -369,7 +524,6 @@ public sealed class OwnershipIndex
     {
         try
         {
-            var player = PlayerState.Instance();
             foreach (var classJobId in classJobIds)
             {
                 if (classJobId == 0)
@@ -378,8 +532,11 @@ public sealed class OwnershipIndex
                 var unlocked = false;
                 try
                 {
-                    unlocked = player != null && player->IsLoaded &&
-                               player->GetClassJobLevel((int)classJobId, false) > 0;
+                    unlocked = IsBaseClass(classJobId)
+                        ? ReadClassJobLevel(classJobId) >= 1
+                        : advancedJobs.Contains(classJobId)
+                            ? IsDerivedJobSoulCrystalOwned(classJobId)
+                            : ReadClassJobLevel(classJobId) >= 1;
                 }
                 catch
                 {
@@ -473,6 +630,95 @@ public sealed class OwnershipIndex
         // If the relevant game state is temporarily unavailable, keep the item as
         // unlock-capable so it will be eligible on the next explicit /cqg scan.
         return new PermanentUnlockCheckResult(OwnershipStatus.Missing, true);
+    }
+
+    // Target-scoped ownership query for event-driven monitoring. This never scans
+    // the game catalog or calls a source resolver; it checks only loaded containers.
+    // Call only for an item ID flagged by the inventory event's in-memory index.
+    public void NoteVerifiedPhysicalPresence(uint itemId)
+    {
+        // Add only to an existing snapshot, never claim that a complete full
+        // ownership snapshot exists when none has been captured.
+        if (hasSnapshot && itemId != 0)
+            physicalItems.Add(itemId);
+    }
+
+    // Counts only currently accessible containers; never uses source resolution or cached ownership.
+    // Use for an affected pinned item, not as per-frame work.
+    public int CountPhysicallyPresentNow(uint itemId)
+    {
+        if (itemId == 0) return 0;
+        long count = 0;
+        foreach (var container in PhysicalContainers)
+        {
+            try
+            {
+                foreach (var item in inventory.GetInventoryItems(container))
+                    if (!item.IsEmpty && item.BaseItemId == itemId && item.Quantity > 0)
+                        count += item.Quantity;
+            }
+            catch { /* Unloaded containers are not considered verified possession. */ }
+        }
+        return (int)Math.Min(count, int.MaxValue);
+    }
+
+    // One sweep for login reconciliation of quantity-goal pins.
+    public Dictionary<uint, int> CountPhysicallyPresentTrackedItems(HashSet<uint> tracked)
+    {
+        var counts = new Dictionary<uint, int>();
+        if (tracked.Count == 0) return counts;
+        foreach (var container in PhysicalContainers)
+        {
+            try
+            {
+                foreach (var item in inventory.GetInventoryItems(container))
+                {
+                    if (item.IsEmpty || item.Quantity == 0 || !tracked.Contains(item.BaseItemId)) continue;
+                    counts.TryGetValue(item.BaseItemId, out var previous);
+                    counts[item.BaseItemId] = (int)Math.Min((long)previous + item.Quantity, int.MaxValue);
+                }
+            }
+            catch { }
+        }
+        return counts;
+    }
+
+    public bool IsPhysicallyPresentNow(uint itemId)
+    {
+        if (itemId == 0) return false;
+        foreach (var container in PhysicalContainers)
+        {
+            try
+            {
+                foreach (var item in inventory.GetInventoryItems(container))
+                    if (!item.IsEmpty && item.BaseItemId == itemId && item.Quantity > 0)
+                        return true;
+            }
+            catch
+            {
+                // Some containers are unavailable outside their normal UI.
+            }
+        }
+        return false;
+    }
+
+    // Single bounded container sweep after login. Does not alter existing
+    // Glamour Dresser/permanent unlock ownership caches.
+    public HashSet<uint> GetPhysicallyPresentTrackedItems(HashSet<uint> tracked)
+    {
+        var found = new HashSet<uint>();
+        if (tracked.Count == 0) return found;
+        foreach (var container in PhysicalContainers)
+        {
+            try
+            {
+                foreach (var item in inventory.GetInventoryItems(container))
+                    if (!item.IsEmpty && item.Quantity > 0 && tracked.Contains(item.BaseItemId))
+                        found.Add(item.BaseItemId);
+            }
+            catch { }
+        }
+        return found;
     }
 
     private void CapturePhysicalInventory()

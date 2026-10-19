@@ -1054,7 +1054,7 @@ public sealed partial class Plugin
                 : ownership.GetItemStatus(dependency.CostItemId);
 
             if (owned.IsOwned)
-                ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(owned) ? GlamourPink : OwnedGreen);
+                ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(owned));
             ImGui.TextUnformatted($"{dependency.Amount:N0} {dependency.CostItemName}");
             if (owned.IsOwned)
                 ImGui.PopStyleColor();
@@ -1096,7 +1096,8 @@ public sealed partial class Plugin
                 string.Empty,
                 "Pin Item",
                 "Unpin Item",
-                buttonSize: dependencyButtonSize);
+                buttonSize: dependencyButtonSize,
+                prerequisiteForKind: "Item", prerequisiteForNumericId: targetItemId);
         }
     }
 
@@ -1144,7 +1145,7 @@ public sealed partial class Plugin
                 if (owned.IsOwned)
                     ImGui.PushStyleColor(
                         ImGuiCol.Text,
-                        IsGlamourDresserOwnership(owned) ? GlamourPink : OwnedGreen);
+                        OwnedTextColor(owned));
                 ImGui.TextUnformatted($"{ingredient.Amount:N0} {ingredient.Name}");
                 if (owned.IsOwned)
                     ImGui.PopStyleColor();
@@ -1172,7 +1173,8 @@ public sealed partial class Plugin
                     string.Empty,
                     "Pin Item",
                     "Unpin Item",
-                    buttonSize: buttonSize);
+                    buttonSize: buttonSize,
+                    prerequisiteForKind: "Item", prerequisiteForNumericId: targetItemId);
             }
 
             ImGui.TreePop();
@@ -1625,7 +1627,7 @@ public sealed partial class Plugin
         }
 
         var label = string.IsNullOrWhiteSpace(buttonLabel) ? location : buttonLabel!;
-        if (ImGui.SmallButton($"{label}##map-{id}"))
+        if (ImGui.Button($"{label}##map-{id}"))
             OpenMapLocation(location, npcName, npcId);
 
         if (ImGui.IsItemHovered())

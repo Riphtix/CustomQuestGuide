@@ -29,6 +29,7 @@ public sealed class SetCatalog
             itemByName.TryAdd(target.Name, target.ItemId);
 
         BuildExtremeMountSets();
+        BuildSavageMountSets();
         BuildRidingMapSets();
         BuildRelicSets();
         BuildRelicToolSets();
@@ -149,6 +150,54 @@ public sealed class SetCatalog
             ["Wings of Legacy"]);
     }
 
+
+    // Verified guaranteed Savage raid mount rewards, grouped by expansion.
+    // The complete member list is required before any set becomes visible.
+    // Alexander Midas has no mount reward and ARR Coil has no Savage mount.
+    private void BuildSavageMountSets()
+    {
+        AddCompleteNamedSet(
+            "mount-savage-hw", "Mount Sets", "Heavensward Savage Raid Mounts",
+            "Alexander Gordias and Creator Savage mount rewards (Midas has no mount).",
+            ["Gobwalker Gear", "Arrhidaeus Master Key"]);
+
+        AddCompleteNamedSet(
+            "mount-savage-sb", "Mount Sets", "Stormblood Savage Raid Mounts",
+            "Omega Deltascape, Sigmascape and Alphascape Savage mount rewards.",
+            ["Alte Roite Prism", "Air Force Identification Key", "Model O Identification Key"]);
+
+        AddCompleteNamedSet(
+            "mount-savage-shb", "Mount Sets", "Shadowbringers Savage Raid Mounts",
+            "Eden Gate, Verse and Promise Savage mount rewards.",
+            ["Skyslipper Key", "Ramuh Crystal", "Eden Crystal"]);
+
+        AddCompleteNamedSet(
+            "mount-savage-ew", "Mount Sets", "Endwalker Savage Raid Mounts",
+            "Pandaemonium Asphodelos, Abyssos and Anabaseios Savage mount rewards.",
+            ["Demi-Phoinix Horn", "Sunforged Crystal", "Megaloambystoma Horn"]);
+
+        AddCompleteNamedSet(
+            "mount-savage-dt", "Mount Sets", "Dawntrail Savage Raid Mounts",
+            "Arcadion Light-heavyweight, Cruiserweight and Heavyweight Savage mount rewards.",
+            ["Monowheel S1 Identification Key", "Air-wheeler C9 Identification Key", "Lowrider T1RANT Identification Key"]);
+    }
+
+    private void AddCompleteNamedSet(
+        string id, string group, string name, string description,
+        IReadOnlyList<string> requiredItemNames)
+    {
+        // Unlike legacy catalog-backed sets, do not offer incomplete collections
+        // when a named member is absent or excluded from the target catalog.
+        if (requiredItemNames.Count == 0 ||
+            requiredItemNames.Any(itemName => !itemByName.ContainsKey(itemName)))
+            return;
+
+        var ids = requiredItemNames.Select(itemName => itemByName[itemName]).Distinct().ToArray();
+        if (ids.Length != requiredItemNames.Count)
+            return;
+
+        Add(id, group, name, description, ids, Array.Empty<uint>());
+    }
 
     private void BuildRidingMapSets()
     {

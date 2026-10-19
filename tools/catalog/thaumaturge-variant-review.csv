@@ -1,0 +1,12 @@
+classJobId,questId,order,kind,variantCondition,referenceUrl,reviewStatus,notes
+7,65719,0,exclude,,https://na.finalfantasyxiv.com/lodestone/playguide/db/quest/,candidate,Introductory guild conversation
+7,65881,0,unlock,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Class-unlock quest never progression
+7,65882,1,alternative,not_starting_class,https://ffxiv.consolegameswiki.com/wiki/My_First_Scepter,candidate,Only for later THM unlocks
+7,65883,2,progression,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Level 5
+7,65884,3,alternative,starting_class,https://eorzeantavern.com/ffxiv-quests/the-threat-of-paucity/,candidate,ID-to-path assignment NOT verified
+7,65885,3,alternative,not_starting_class,https://eorzeantavern.com/ffxiv-quests/the-threat-of-paucity/,candidate,ID-to-path assignment NOT verified
+7,65886,4,progression,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Level 15
+7,65887,5,progression,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Level 20
+7,65888,6,progression,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Level 25
+7,65889,7,progression,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Level 30
+7,66609,0,exclude,,https://ffxiv.consolegameswiki.com/wiki/List_of_thaumaturge_quests,candidate,Black Mage unlock stage not THM progression

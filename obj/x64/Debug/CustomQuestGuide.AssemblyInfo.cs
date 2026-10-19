@@ -12,13 +12,12 @@ using System.Reflection;
 
 [assembly: System.Reflection.AssemblyCompanyAttribute("CustomQuestGuide")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
-[assembly: System.Reflection.AssemblyDescriptionAttribute(("Target-oriented acquisition, pinning, ownership, and formal class/job progression" +
-    " guidance for FFXIV."))]
-[assembly: System.Reflection.AssemblyFileVersionAttribute("1.3.7.1")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.3.7.1+a9a6169cf3271a55d041fa1d8cb8d020f3370c54")]
+[assembly: System.Reflection.AssemblyDescriptionAttribute(@"Custom Quest Guide helps you work toward the items, unlocks, and achievements you want in FFXIV. Search for gear, mounts, minions, titles, duties, jobs, relics, and curated sets; see acquisition methods and prerequisites; and pin your goals for quick access. Follow quest and NPC guidance, use map pins and duty shortcuts where available, and see which targets you already own or have unlocked.")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.4.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.4.0.0+eb7c264e80540f89ec743abafe7936d1666fe450")]
 [assembly: System.Reflection.AssemblyProductAttribute("CustomQuestGuide")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CustomQuestGuide")]
-[assembly: System.Reflection.AssemblyVersionAttribute("1.3.7.1")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.4.0.0")]
 [assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://github.com/Riphtix/CustomQuestGuide")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]

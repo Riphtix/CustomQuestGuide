@@ -375,9 +375,20 @@ public sealed class DutyUnlockGuidanceIndex
             .Where(char.IsLetterOrDigit)
             .ToArray());
 
+    private readonly Dictionary<string, bool?> focusedUnlocks = new(StringComparer.OrdinalIgnoreCase);
+
+    public void RefreshFocusedUnlocks(IEnumerable<string> dutyNames)
+    {
+        focusedUnlocks.Clear();
+        foreach (var name in dutyNames.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase))
+            focusedUnlocks[NormalizeDutyName(name)] = ReadDutyUnlocked(name);
+    }
+
     public bool? IsDutyUnlocked(string dutyName)
     {
         dutyName = NormalizeDutyName(dutyName);
+        if (focusedUnlocks.TryGetValue(dutyName, out var focused) && focused.HasValue)
+            return focused;
         return unlockSnapshot.TryGetValue(dutyName, out var unlocked) ? unlocked : null;
     }
 

@@ -25,11 +25,6 @@ public sealed partial class Plugin
     private void DrawItemsNavigation()
     {
         ImGui.Spacing();
-        ImGui.TextUnformatted("Set Target");
-        ImGui.Separator();
-        DrawSetSelector();
-
-        ImGui.Spacing();
         ImGui.TextUnformatted("Browse Filters");
         ImGui.Separator();
         DrawItemFilterControls();
@@ -236,13 +231,13 @@ public sealed partial class Plugin
 
         foreach (var member in members)
         {
-            var result = resolver.Resolve(member);
-            var primary = result.Sources.FirstOrDefault();
+            // Owned members need no acquisition-source resolution. Avoid potentially
+            // expensive resolver work during every rendered frame.
             var owned = ownership.GetItemStatus(member.ItemId);
 
             if (owned.IsOwned)
             {
-                ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(owned) ? GlamourPink : OwnedGreen);
+                ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(owned));
                 ImGui.BulletText($"{member.Name} — Owned ({owned.Source})");
                 ImGui.PopStyleColor();
                 continue;
@@ -254,6 +249,8 @@ public sealed partial class Plugin
                 continue;
             }
 
+            var result = resolver.Resolve(member);
+            var primary = result.Sources.FirstOrDefault();
             var action = actionGuidance.Resolve(result);
             if (!action.IsEmpty)
             {
@@ -595,7 +592,7 @@ public sealed partial class Plugin
             var source = result.Sources.FirstOrDefault();
             var owned = ownership.GetItemStatus(member.ItemId);
             if (owned.IsOwned)
-                ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(owned) ? GlamourPink : OwnedGreen);
+                ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(owned));
             ImGui.BulletText(owned.IsOwned
                 ? $"{member.Name} — Owned ({owned.Source})"
                 : source is null
@@ -987,15 +984,106 @@ public sealed partial class Plugin
         bool IsNpcLocation = false,
         bool IsLocationOnly = false);
 
+    private void DrawCompletionPreferences()
+    {
+        if (!ImGui.CollapsingHeader("Completion settings"))
+            return;
+
+        var autoUnpin = config.AutoUnpinCompletedTargets;
+        if (ImGui.Checkbox("Automatically unpin completed targets", ref autoUnpin))
+        {
+            config.AutoUnpinCompletedTargets = autoUnpin;
+            SaveConfig();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Confirmed completed targets are removed automatically unless Sticky is enabled.");
+
+        var chatNotifications = config.CompletionChatNotifications;
+        if (ImGui.Checkbox("Show completion notifications in chat", ref chatNotifications))
+        {
+            config.CompletionChatNotifications = chatNotifications;
+            SaveConfig();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("CQG announces verified target completion and any automatic pin removal.");
+
+        ImGui.TextDisabled("Inventory acquisition is event-driven; other targets reconcile on /cqg scans.");
+        ImGui.Spacing();
+    }
+
     private void DrawPinnedTargetsTab()
     {
         RefreshPinnedUiSnapshotIfDue();
-        DrawPinnedRefreshCountdown();
 
-        ImGui.TextWrapped(
-            "Unified priority queue for item, emote, title, set, duty, job-unlock, and formal job-progression targets. " +
-            "Priority is the list order.");
-        ImGui.Spacing();
+        // Keep the capacity and refresh information on one compact header row.
+        ImGui.TextUnformatted($"Watchlist  {config.PinnedTargets.Count} / {PinnedTargetPolicy.MaximumPins}");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Pins are listed in priority order. Sticky pins remain in the Watchlist after completion, even with automatic unpinning enabled.");
+        ImGui.SameLine();
+        DrawPinnedRefreshCountdown();
+        if (!PinnedTargetPolicy.CanAdd(config.PinnedTargets.Count))
+            ImGui.TextDisabled("Pin limit reached — remove a target before adding another.");
+        ImGui.Separator();
+
+        if (ImGui.CollapsingHeader("Focused Tracking Settings"))
+        {
+            if (ImGui.SmallButton(config.FocusedTrackingEditMode ? "Finish Focused Layout" : "Edit Focused Layout"))
+            {
+                config.FocusedTrackingEditMode = !config.FocusedTrackingEditMode;
+                SaveConfig();
+            }
+            ImGui.SameLine();
+            ImGui.TextUnformatted("Text alignment:");
+            ImGui.SameLine();
+            if (ImGui.SmallButton(config.FocusedTrackingLeftAligned ? "Left##FocusedAlign" : "Right##FocusedAlign"))
+            {
+                config.FocusedTrackingLeftAligned = !config.FocusedTrackingLeftAligned;
+                SaveConfig();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Choose left or right alignment for all Focused Tracking text.");
+
+            var attached = config.FocusedTrackingAttachToQuestList;
+            if (ImGui.Checkbox("Attach to Bottom of Quest List##FocusedAnchor", ref attached))
+            {
+                config.FocusedTrackingAttachToQuestList = attached;
+                SaveConfig();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Follow the bottommost visible quest in FFXIV's native tracker. Falls back to your saved manual position when unavailable.");
+            if (attached)
+            {
+                var gap = config.FocusedTrackingQuestListGap;
+                ImGui.SetNextItemWidth(145f);
+                if (ImGui.SliderFloat("Vertical spacing (px)##FocusedGap", ref gap, 0f, 32f, "%.0f"))
+                {
+                        config.FocusedTrackingQuestListGap = gap;
+                        SaveConfig();
+                }
+                var horizontalOffset = config.FocusedTrackingQuestListHorizontalOffset;
+                ImGui.SetNextItemWidth(145f);
+                if (ImGui.SliderFloat("Horizontal offset (px)##FocusedHorizontal", ref horizontalOffset, -250f, 250f, "%.0f"))
+                {
+                        config.FocusedTrackingQuestListHorizontalOffset = horizontalOffset;
+                        SaveConfig();
+                }
+                if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Negative moves the tracker left; positive moves it right relative to the native quest list.");
+            }
+            var showIcons = config.FocusedTrackingShowIcons;
+            if (ImGui.Checkbox("Show FFXIV Icons##FocusedIcons", ref showIcons))
+            {
+                config.FocusedTrackingShowIcons = showIcons;
+                PrimeFocusedIconsOnStartup();
+                SaveConfig();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show native FFXIV icons for jobs, items, and collection sets where game data provides an appropriate icon.");
+
+        }
+
+        DrawCompletionPreferences();
+        DrawPinnedCompletionUndo();
 
         if (config.PinnedTargets.Count == 0)
         {
@@ -1032,17 +1120,28 @@ public sealed partial class Plugin
                 ImGui.Unindent();
             }
 
-            DrawPinnedProgress(pin, derived);
+            if (!string.IsNullOrWhiteSpace(pin.PrerequisiteForKind))
+            {
+                ImGui.Indent();
+                ImGui.TextDisabled($"Linked prerequisite for {DescribeLinkedPrerequisiteParent(pin)}");
+                ImGui.Unindent();
+            }
 
-            var pinButtonSize = new Vector2(PinnedActionButtonWidth, 0f);
-            if (ImGui.Button("Open", pinButtonSize))
+            DrawPinnedProgress(pin, derived);
+            if (pin.Kind.Equals("Item", StringComparison.OrdinalIgnoreCase))
+                DrawPinnedQuantityGoal(pin);
+
+            // Actions share a compact toolbar. The priority number is already visible
+            // above, so narrow arrow buttons don't need the full width of Open/Remove.
+            if (ImGui.SmallButton("Open"))
                 OpenPinnedTarget(pin);
 
             ImGui.SameLine();
             var canMoveUp = i > 0;
             if (!canMoveUp)
                 ImGui.BeginDisabled();
-            var moveUp = ImGui.Button("Up", pinButtonSize);
+            var moveUp = ImGui.SmallButton("↑");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Move up one priority");
             if (!canMoveUp)
                 ImGui.EndDisabled();
             if (moveUp && canMoveUp)
@@ -1056,7 +1155,8 @@ public sealed partial class Plugin
             var canMoveDown = i < config.PinnedTargets.Count - 1;
             if (!canMoveDown)
                 ImGui.BeginDisabled();
-            var moveDown = ImGui.Button("Down", pinButtonSize);
+            var moveDown = ImGui.SmallButton("↓");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Move down one priority");
             if (!canMoveDown)
                 ImGui.EndDisabled();
             if (moveDown && canMoveDown)
@@ -1069,7 +1169,8 @@ public sealed partial class Plugin
             ImGui.SameLine();
             if (!canMoveUp)
                 ImGui.BeginDisabled();
-            var moveTop = ImGui.Button("Top", pinButtonSize);
+            var moveTop = ImGui.SmallButton("Top");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Move to highest priority");
             if (!canMoveUp)
                 ImGui.EndDisabled();
             if (moveTop && canMoveUp)
@@ -1083,7 +1184,34 @@ public sealed partial class Plugin
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Remove", pinButtonSize))
+            if (ImGui.SmallButton(pin.IsSticky ? "Sticky ✓" : "Sticky"))
+            {
+                pin.IsSticky = !pin.IsSticky;
+                SaveConfig();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(pin.IsSticky
+                    ? "Sticky is on: keep this pin after completion. Click to turn off."
+                    : "Sticky is off: this pin can automatically unpin after completion. Click to keep it.");
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton(pin.FocusedTrackingEnabled ? "Focused ✓" : "Focus"))
+            {
+                if (!pin.FocusedTrackingEnabled && string.IsNullOrWhiteSpace(pin.FocusedTrackingId))
+                    pin.FocusedTrackingId = Guid.NewGuid().ToString("N");
+                if (pin.FocusedTrackingEnabled || config.PinnedTargets.Count(p => p.FocusedTrackingEnabled) < MaxFocusedTargets)
+                {
+                    pin.FocusedTrackingEnabled = !pin.FocusedTrackingEnabled;
+                    SaveConfig();
+                }
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(!pin.FocusedTrackingEnabled && config.PinnedTargets.Count(p => p.FocusedTrackingEnabled) >= MaxFocusedTargets
+                    ? "Focused Tracking supports at most 3 targets. Unfocus one first."
+                    : "Add or remove this Watchlist entry from the shared Focused Tracking HUD.");
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Remove"))
             {
                 config.PinnedTargets.RemoveAt(i);
                 SaveConfig();
@@ -1097,6 +1225,78 @@ public sealed partial class Plugin
     }
 
 
+
+    // Keep Watchlist and Focused Tracking decisions in one place.
+    private const int MaxFocusedTargets = 3;
+
+    private static bool IsJobPin(PinnedTargetConfig pin) =>
+        pin.Kind.Equals("JobUnlock", StringComparison.OrdinalIgnoreCase) ||
+        pin.Kind.Equals("JobProgression", StringComparison.OrdinalIgnoreCase);
+
+    private static string PinnedTargetCacheKey(PinnedTargetConfig pin) =>
+        $"{pin.Kind}\u001f{pin.NumericId}\u001f{pin.StringId}\u001f{pin.Variant}";
+
+    private static System.Numerics.Vector4 OwnedTextColor(OwnershipStatus status) =>
+        IsGlamourDresserOwnership(status) ? GlamourPink : OwnedGreen;
+
+    // Invalidate the guidance of a newly focused target without rebuilding
+    // unrelated Watchlist rows. The next draw resolves this entry on demand.
+    private void InvalidatePinnedUiDerived(PinnedTargetConfig pin)
+    {
+        var key = PinnedTargetCacheKey(pin);
+        pinnedUiDerivedCache.Remove(key);
+    }
+
+    // Keep target-scoped ownership evaluation together for both independent HUD
+    // initialization and scheduled updates. Never run the full catalog scan here.
+    // One definition of variant-aware set membership, shared by completion,
+    // guidance and the targeted Focused Tracking ownership refresh.
+    private uint[] GetApplicableSetItemIds(PinnedTargetConfig pin, IEnumerable<uint> itemIds) =>
+        itemIds.Where(id => string.IsNullOrWhiteSpace(pin.Variant) ||
+            catalog.GetById(id)?.EquipJobs.Contains(pin.Variant) == true).ToArray();
+
+    private void RefreshFocusedTargetStates(IReadOnlyList<PinnedTargetConfig> focused)
+    {
+        var focusedJobIds = focused
+            .Where(p => IsJobPin(p))
+            .Select(p => p.NumericId);
+        ownership.RefreshFocusedJobUnlocks(focusedJobIds);
+        // The cap is on focused TARGETS, not the number of item IDs.
+        // A focused collection can contain dozens of members. Resolve the
+        // applicable member IDs once per refresh, never once per draw.
+        var focusedItems = new HashSet<uint>();
+        foreach (var pin in focused)
+        {
+            if (pin.Kind.Equals("Item", StringComparison.OrdinalIgnoreCase) && pin.NumericId != 0)
+                focusedItems.Add(pin.NumericId);
+            else if (pin.Kind.Equals("Set", StringComparison.OrdinalIgnoreCase) &&
+                     setCatalog.Get(pin.StringId) is { } set)
+            {
+                foreach (var id in GetApplicableSetItemIds(pin, set.ItemIds))
+                    if (id != 0)
+                        focusedItems.Add(id);
+            }
+            else if (pin.Kind.Equals("Emote", StringComparison.OrdinalIgnoreCase) &&
+                     pin.NumericId <= ushort.MaxValue &&
+                     emoteCatalog.Get((ushort)pin.NumericId) is { } emote && emote.BackingItemId != 0)
+                focusedItems.Add(emote.BackingItemId);
+        }
+        ownership.RefreshFocusedItemOwnership(focusedItems);
+        // These are also target-scoped, not the normal /cqg catalog scan.
+        emoteCatalog.RefreshFocusedUnlocks(focused
+            .Where(p => p.Kind.Equals("Emote", StringComparison.OrdinalIgnoreCase) && p.NumericId <= ushort.MaxValue)
+            .Select(p => (ushort)p.NumericId));
+        titleCatalog.RefreshFocusedUnlocks(focused
+            .Where(p => p.Kind.Equals("Title", StringComparison.OrdinalIgnoreCase) && p.NumericId <= ushort.MaxValue)
+            .Select(p => (ushort)p.NumericId));
+        dutyUnlocks.RefreshFocusedUnlocks(focused
+            .Where(p => p.Kind.Equals("Duty", StringComparison.OrdinalIgnoreCase))
+            .Select(p => dutyCatalog.Get(p.NumericId)?.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!));
+        foreach (var pin in focused)
+            InvalidatePinnedUiDerived(pin);
+    }
 
     private void RefreshPinnedUiSnapshotIfDue()
     {
@@ -1132,6 +1332,47 @@ public sealed partial class Plugin
         ImGui.TextDisabled(text);
     }
 
+    private void DrawPinnedQuantityGoal(PinnedTargetConfig pin)
+    {
+        var value = Math.Max(1, pin.DesiredQuantity);
+        ImGui.Indent();
+        ImGui.TextDisabled("Qty goal (minimum 1):");
+        ImGui.SameLine();
+        var modified = false;
+        if (ImGui.SmallButton("+##quantity"))
+        {
+            value = Math.Min(999999, value + 1);
+            modified = true;
+        }
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(66);
+        if (ImGui.InputInt("##quantity", ref value, 0, 0)) modified = true;
+        ImGui.SameLine();
+        if (ImGui.SmallButton("-##quantity"))
+        {
+            value = Math.Max(1, value - 1);
+            modified = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Goal is the number of copies currently held in accessible inventory (minimum 1).");
+        if (modified)
+        {
+            var next = Math.Clamp(value, 1, 999999);
+            if (next != pin.DesiredQuantity)
+            {
+                pin.DesiredQuantity = next;
+                QueuePinnedQuantityRecheck(pin.NumericId);
+                SaveConfig();
+            }
+        }
+        if (pin.DesiredQuantity > 1 && pinnedItemQuantityCounts.TryGetValue(pin.NumericId, out var count))
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"{count} / {pin.DesiredQuantity}");
+        }
+        ImGui.Unindent();
+    }
+
     private void DrawPinnedProgress(PinnedTargetConfig pin, PinnedUiDerivedCache derived)
     {
         if (derived.Progress is { } progress)
@@ -1160,7 +1401,7 @@ public sealed partial class Plugin
 
     private PinnedUiDerivedCache GetPinnedUiDerived(PinnedTargetConfig pin)
     {
-        var key = $"{pin.Kind}\u001f{pin.NumericId}\u001f{pin.StringId}\u001f{pin.Variant}";
+        var key = PinnedTargetCacheKey(pin);
         if (pinnedUiDerivedCache.TryGetValue(key, out var cached))
             return cached;
 
@@ -1182,25 +1423,25 @@ public sealed partial class Plugin
             jobPartial = unlocked && !complete;
             if (unlocked && pinnedJob.Progression.Count > 0)
             {
-                var sequence = ResolveJobQuestSequence(pinnedJob.Progression);
-                var completed = sequence.Entries.Count(x => x.EffectiveState == QuestProgressState.Completed);
-                progress = new PinnedProgressSnapshot("Quest progression", completed, pinnedJob.Progression.Count, "quests");
+                var completed = CountConfirmedProgressionQuests(pinnedJob);
+                progress = new PinnedProgressSnapshot("Quest progression", completed, GetApplicableProgression(pinnedJob).Count, "quests");
             }
         }
         else if (pin.Kind.Equals("Set", StringComparison.OrdinalIgnoreCase) &&
                  setCatalog.Get(pin.StringId) is { } set)
         {
-            var members = set.ItemIds
+            var members = GetApplicableSetItemIds(pin, set.ItemIds)
                 .Select(catalog.GetById)
                 .Where(x => x is not null)
                 .Cast<TargetEntry>()
-                .Where(x => string.IsNullOrWhiteSpace(pin.Variant) || x.EquipJobs.Contains(pin.Variant))
                 .ToArray();
             if (members.Length > 0)
             {
                 var owned = members.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
-                progress = new PinnedProgressSnapshot("Collection progress", owned, members.Length, "owned");
-                complete = owned == members.Length;
+                var applicableIds = GetApplicableSetItemIds(pin, set.ItemIds);
+                progress = new PinnedProgressSnapshot("Collection progress", owned, applicableIds.Length, "owned");
+                complete = applicableIds.Length > 0 && members.Length == applicableIds.Length &&
+                    owned == applicableIds.Length;
             }
         }
 
@@ -1270,16 +1511,22 @@ public sealed partial class Plugin
             case "JobUnlock":
             {
                 var job = jobCatalog.Get(pin.NumericId);
-                if (job?.UnlockQuest is null || ownership.IsJobUnlocked(job.ClassJobId) || string.IsNullOrWhiteSpace(job.UnlockQuest.QuestGiver))
+                if (job is null || ownership.IsJobUnlocked(job.ClassJobId))
                     return null;
-                return new PinnedLocationHint("Map", job.UnlockQuest.QuestGiver!, job.UnlockQuest.QuestGiver, job.UnlockQuest.Location, null, IsNpcLocation: true);
+                var step = GetMissingBaseClassUnlock(job)?.UnlockQuest;
+                if (step is null && GetMissingBaseClassProgression(job) is { } parent)
+                    step = GetNextConfirmedProgressionQuest(parent);
+                step ??= job.UnlockQuest;
+                if (string.IsNullOrWhiteSpace(step?.QuestGiver))
+                    return null;
+                return new PinnedLocationHint("Map", step.QuestGiver!, step.QuestGiver, step.Location, null, IsNpcLocation: true);
             }
             case "JobProgression":
             {
                 var job = jobCatalog.Get(pin.NumericId);
-                if (job is null)
+                if (job is null || !ownership.IsJobUnlocked(job.ClassJobId))
                     return null;
-                var sequence = ResolveJobQuestSequence(job.Progression);
+                var sequence = ResolveJobQuestSequence(GetApplicableProgression(job));
                 var actionable = sequence.CurrentOrNext;
                 if (string.IsNullOrWhiteSpace(actionable?.Info?.QuestGiver))
                     return null;
@@ -1363,25 +1610,58 @@ public sealed partial class Plugin
         if (!ownership.IsJobUnlocked(job.ClassJobId))
             return JobVisualState.Locked;
 
-        // ARR base classes are necessarily complete through their class quest line
-        // once one of their derived jobs has been unlocked. This is also a useful
-        // fallback when the Quest sheet does not expose the full base-class chain.
-        if (GetUnlockedDerivedJob(job) is not null)
-            return JobVisualState.Complete;
+        // Unlock and quest completion are independent facts. Do not infer
+        // completed class quests from the derived job's soul crystal or level.
+        if (GetApplicableProgression(job).Count == 0)
+            return JobVisualState.Partial;
 
-        if (job.Progression.Count == 0)
-            return JobVisualState.Complete;
-
-        return ResolveJobQuestSequence(job.Progression).IsComplete
+        return AreAllJobQuestsConfirmedComplete(job)
             ? JobVisualState.Complete
             : JobVisualState.Partial;
     }
+
+    // Resolve the earliest class gate for a derived job. An unowned base class
+    // always precedes both its class quests and the derived job unlock.
+    private JobProgressionTarget? GetMissingBaseClassUnlock(JobProgressionTarget job)
+    {
+        if (job.ParentClassJobId == 0 || job.ParentClassJobId == job.ClassJobId)
+            return null;
+        var parent = jobCatalog.Get(job.ParentClassJobId);
+        return parent is not null && !ownership.IsJobUnlocked(parent.ClassJobId) ? parent : null;
+    }
+
+    private JobProgressionTarget? GetMissingBaseClassProgression(JobProgressionTarget job)
+    {
+        if (job.ParentClassJobId == 0 || job.ParentClassJobId == job.ClassJobId)
+            return null;
+        var parent = jobCatalog.Get(job.ParentClassJobId);
+        if (parent is null || !ownership.IsJobUnlocked(parent.ClassJobId))
+            return null;
+        return job.UnlockPrerequisites.Any(requirement =>
+            !IsQuestCompleteByRowId(requirement.QuestId) &&
+            GetApplicableProgression(parent).Any(step => step.QuestId == requirement.QuestId))
+            ? parent : null;
+    }
+
+    private bool AreAllJobQuestsConfirmedComplete(JobProgressionTarget job) =>
+        HasCompleteProgressionCoverage(job) &&
+        GetApplicableProgression(job).Count > 0 &&
+        GetApplicableProgression(job).All(step => step.QuestId != 0 &&
+            GetQuestStateByRowId(step.QuestId) == QuestProgressState.Completed);
+
+    // ARR advanced jobs share level data with their base class, so a nonzero
+    // ClassJob level cannot establish that the soul-crystal job is unlocked.
+    // Completion of the specific advanced-job unlock quest is authoritative.
+    // Actual job access is proven by the soul crystal, not by a completed
+    // quest or by the ARR base class's shared level.
+    private bool IsDerivedJobUnlockQuestComplete(JobProgressionTarget job) =>
+        ownership.IsJobUnlocked(job.ClassJobId);
 
     private JobProgressionTarget? GetUnlockedDerivedJob(JobProgressionTarget baseClass) =>
         jobCatalog.Jobs.FirstOrDefault(candidate =>
             candidate.ClassJobId != baseClass.ClassJobId &&
             candidate.ParentClassJobId == baseClass.ClassJobId &&
-            ownership.IsJobUnlocked(candidate.ClassJobId));
+            IsDerivedJobUnlockQuestComplete(candidate));
 
     private static void DrawJobStateText(string text, JobVisualState state)
     {
@@ -1413,7 +1693,12 @@ public sealed partial class Plugin
                     .Cast<TargetEntry>()
                     .Where(x => string.IsNullOrWhiteSpace(pin.Variant) || x.EquipJobs.Contains(pin.Variant))
                     .ToArray();
-                return members.Length > 0 && members.All(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+                // Do not silently discard missing catalog IDs and then treat a
+                // truncated set as complete. For job-specific variants, only IDs
+                // with a positively matched job are applicable.
+                var applicableIds = GetApplicableSetItemIds(pin, set.ItemIds);
+                return applicableIds.Length > 0 && members.Length == applicableIds.Length &&
+                    members.All(x => ownership.GetItemStatus(x.ItemId).IsOwned);
             }
             case "JobUnlock":
                 return ownership.IsJobUnlocked(pin.NumericId);
@@ -1429,11 +1714,10 @@ public sealed partial class Plugin
                     return false;
                 if (!ownership.IsJobUnlocked(job.ClassJobId))
                     return false;
-                if (GetUnlockedDerivedJob(job) is not null)
-                    return true;
-                if (job.Progression.Count == 0)
-                    return true;
-                return ResolveJobQuestSequence(job.Progression).IsComplete;
+                // Completion requires every formal class/job quest to be
+                // confirmed complete. Unlocks, levels, and inferred sequence
+                // entries are not substitutes for completed quest flags.
+                return AreAllJobQuestsConfirmedComplete(job);
             }
             default:
                 return false;
@@ -1503,7 +1787,8 @@ public sealed partial class Plugin
             ImGui.PopStyleColor();
 
         ImGui.SameLine();
-        DrawPinToggle("Duty", dutyPinId, string.Empty, "Pin Duty", "Unpin Duty");
+        DrawPinToggle("Duty", dutyPinId, string.Empty, "Pin Duty", "Unpin Duty",
+            prerequisiteForKind: "Item", prerequisiteForNumericId: result.Target.ItemId);
 
         if (string.Equals(source.SpecificityHint, "Exchange dependency", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(source.Detail))
@@ -1732,7 +2017,11 @@ public sealed partial class Plugin
                 ? $"[SET] {set.Name}{(string.IsNullOrWhiteSpace(pin.Variant) ? string.Empty : $" — {pin.Variant} {RelicWeaponType(pin.Variant)}")}"
                 : $"[SET] Missing set {pin.StringId}",
             "JobUnlock" => jobCatalog.Get(pin.NumericId) is { } unlockJob
-                ? $"[JOB] Unlock {unlockJob.Name}"
+                ? GetMissingBaseClassUnlock(unlockJob) is { } baseUnlock
+                    ? $"[JOB] Unlock {baseUnlock.Name} (for {unlockJob.Name})"
+                    : GetMissingBaseClassProgression(unlockJob) is { } baseProgression
+                        ? $"[JOB] {baseProgression.Name} Progression (for {unlockJob.Name})"
+                        : $"[JOB] Unlock {unlockJob.Name}"
                 : $"[JOB] Missing ClassJob #{pin.NumericId}",
             "JobProgression" => jobCatalog.Get(pin.NumericId) is { } progressionJob
                 ? $"[JOB] {progressionJob.Name} Progression"
@@ -1845,8 +2134,14 @@ public sealed partial class Plugin
                 }
 
                 var ownedCount = members.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
-                if (members.Length > 0 && ownedCount == members.Length)
-                    return $"Complete — {ownedCount} / {members.Length} owned.";
+                // Never report a collection complete if its definition contains
+                // members not present in the target catalog (or a variant could
+                // not resolve to a valid member). Missing data is not ownership.
+                var expectedMembers = set.ItemIds.Count(id =>
+                    string.IsNullOrWhiteSpace(pin.Variant) ||
+                    catalog.GetById(id)?.EquipJobs.Contains(pin.Variant) == true);
+                if (expectedMembers > 0 && members.Length == expectedMembers && ownedCount == expectedMembers)
+                    return $"Complete — {ownedCount} / {expectedMembers} owned.";
 
                 var prerequisiteMembers = members.Where(x => !IsCompletionReward(set, x)).ToArray();
                 var prerequisiteOwned = prerequisiteMembers.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
@@ -1908,6 +2203,25 @@ public sealed partial class Plugin
                 var job = jobCatalog.Get(pin.NumericId);
                 if (job is null)
                     return "Class/job is no longer present in the current game data.";
+                // Once the job itself is unlocked, stale or incomplete parent
+                // evidence must not keep guiding the player to unlock it.
+                if (ownership.IsJobUnlocked(job.ClassJobId))
+                    return $"Unlocked — {job.Name}.";
+                if (GetMissingBaseClassUnlock(job) is { } missingBase)
+                {
+                    var baseQuest = missingBase.UnlockQuest;
+                    if (baseQuest is null)
+                        return $"Requires unlocking {missingBase.Name}. Open this pin for class guidance.";
+                    return $"Requires {missingBase.Name} unlock — Next: {baseQuest.Name}" +
+                        (string.IsNullOrWhiteSpace(baseQuest.QuestGiver) ? string.Empty : $" — Go to {baseQuest.QuestGiver}" +
+                        (string.IsNullOrWhiteSpace(baseQuest.Location) ? string.Empty : $" — {baseQuest.Location}"));
+                }
+                if (GetMissingBaseClassProgression(job) is { } missingProgression)
+                {
+                    var nextParentStep = GetNextConfirmedProgressionQuest(missingProgression);
+                    return nextParentStep is null ? $"Requires {missingProgression.Name} progression" :
+                        $"Requires {missingProgression.Name} progression — Next: {nextParentStep.Name}";
+                }
                 if (job.UnlockQuest is null)
                     return "No explicit unlock quest relation found.";
                 var state = GetQuestStateByRowId(job.UnlockQuest.QuestId);
@@ -1926,16 +2240,23 @@ public sealed partial class Plugin
                 if (job is null)
                     return "Class/job is no longer present in the current game data.";
 
-                var sequence = ResolveJobQuestSequence(job.Progression);
-                var completed = sequence.Entries.Count(x => x.EffectiveState == QuestProgressState.Completed);
-                var actionable = sequence.CurrentOrNext;
-                if (actionable is null)
-                    return $"Formal progression complete ({completed} / {job.Progression.Count}).";
-                var who = sequence.Active is null ? FormatWhoWhere(actionable.Info) : string.Empty;
-                var label = sequence.Active is not null ? "Current" : "Next";
+                if (!ownership.IsJobUnlocked(job.ClassJobId))
+                    return $"{job.Name} is locked — unlock it before tracking its progression.";
+                var completed = CountConfirmedProgressionQuests(job);
+                var applicable = GetApplicableProgression(job);
+                var next = GetNextConfirmedProgressionQuest(job);
+                if (next is null)
+                    return applicable.Count == 0 ? "Progression quest data unavailable." :
+                        AreAllJobQuestsConfirmedComplete(job)
+                            ? $"Formal progression complete ({completed} / {applicable.Count})."
+                            : $"All currently resolved quests complete ({completed} / {applicable.Count}); remaining coverage unverified.";
+                var current = GetQuestStateByRowId(next.QuestId) == QuestProgressState.InProgress;
+                var who = current || string.IsNullOrWhiteSpace(next.QuestGiver) ? string.Empty :
+                    $"{next.QuestGiver}{(string.IsNullOrWhiteSpace(next.Location) ? string.Empty : $" — {next.Location}")}";
+                var label = current ? "Current" : "Next";
                 return string.IsNullOrWhiteSpace(who)
-                    ? $"{completed} / {job.Progression.Count} complete — {label}: {actionable.Name}"
-                    : $"{completed} / {job.Progression.Count} complete — {label}: {actionable.Name} — Go to {who}";
+                    ? $"{completed} / {applicable.Count} complete — {label}: {next.Name}"
+                    : $"{completed} / {applicable.Count} complete — {label}: {next.Name} — Go to {who}";
             }
             default:
                 return "Unknown pinned target type.";
@@ -1994,6 +2315,8 @@ public sealed partial class Plugin
                 var job = jobCatalog.Get(pin.NumericId);
                 if (job is null)
                     return;
+                // Open the original pinned job so the prerequisite is shown
+                // there alongside Back navigation to the selected class.
                 SelectJobTarget(job);
                 targetSearch = string.Empty;
                 break;
@@ -2015,12 +2338,44 @@ public sealed partial class Plugin
         string pinLabel = "Pin Target",
         string unpinLabel = "Unpin",
         string variant = "",
-        Vector2? buttonSize = null)
+        Vector2? buttonSize = null,
+        string prerequisiteForKind = "",
+        uint prerequisiteForNumericId = 0,
+        string prerequisiteForStringId = "",
+        string prerequisiteForVariant = "")
     {
         var index = FindPinIndex(kind, numericId, stringId, variant);
         var pinned = index >= 0;
+        // A target explicitly pinned by the user is not a disposable dependency.
+        // Never let a contextual Pin Prerequisite control unpin or relabel it.
+        var contextual = !string.IsNullOrWhiteSpace(prerequisiteForKind);
+        var independentlyPinned = contextual && pinned &&
+            string.IsNullOrWhiteSpace(config.PinnedTargets[index].PrerequisiteForKind);
+        if (independentlyPinned)
+        {
+            ImGui.BeginDisabled();
+            ImGui.Button("Already in Watchlist", buttonSize ?? Vector2.Zero);
+            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("This target was pinned independently and will not be automatically cleaned up as a prerequisite.");
+            return;
+        }
 
-        if (!ImGui.Button(pinned ? unpinLabel : pinLabel, buttonSize ?? Vector2.Zero))
+        var atCapacity = !pinned && !PinnedTargetPolicy.CanAdd(config.PinnedTargets.Count);
+        if (atCapacity)
+            ImGui.BeginDisabled();
+        var clicked = ImGui.Button(pinned ? unpinLabel : pinLabel, buttonSize ?? Vector2.Zero);
+        if (atCapacity)
+        {
+            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip($"Pin limit reached ({PinnedTargetPolicy.MaximumPins}). Remove an existing pin to add another.");
+        }
+        if (!atCapacity && ImGui.IsItemHovered())
+            ImGui.SetTooltip(pinned
+                ? "Remove this pinned target. Sticky behavior is configured in Watchlist."
+                : "Add to Watchlist. Pins can be made Sticky there to keep them after completion.");
+        if (!clicked || atCapacity)
             return;
 
         if (pinned)
@@ -2035,6 +2390,10 @@ public sealed partial class Plugin
                 NumericId = numericId,
                 StringId = stringId,
                 Variant = variant,
+                PrerequisiteForKind = prerequisiteForKind,
+                PrerequisiteForNumericId = prerequisiteForNumericId,
+                PrerequisiteForStringId = prerequisiteForStringId,
+                PrerequisiteForVariant = prerequisiteForVariant,
             });
         }
 

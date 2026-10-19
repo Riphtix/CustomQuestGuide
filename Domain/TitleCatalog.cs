@@ -93,8 +93,27 @@ public sealed class TitleCatalog
         polling = false;
     }
 
+    private readonly Dictionary<ushort, bool> focusedUnlocks = [];
+
+    public unsafe void RefreshFocusedUnlocks(IEnumerable<ushort> titleIds)
+    {
+        focusedUnlocks.Clear();
+        var ui = UIState.Instance();
+        if (ui == null) return;
+        var list = &ui->TitleList;
+        // Do not request the whole title list repeatedly from the HUD.
+        if (!list->DataReceived) return;
+        foreach (var id in titleIds.Where(id => id != 0).Distinct())
+        {
+            try { focusedUnlocks[id] = list->IsTitleUnlocked(id); }
+            catch { /* Unavailable game state: retain unknown. */ }
+        }
+    }
+
     public bool? IsUnlocked(ushort titleId)
     {
+        if (focusedUnlocks.TryGetValue(titleId, out var focused))
+            return focused;
         if (!HasOwnershipSnapshot || titleId == 0)
             return null;
         return unlockedSnapshot.Contains(titleId);

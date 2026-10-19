@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 2,
+  "jobs": [
+    {
+      "classJobId": 1,
+      "verifiedComplete": true,
+      "stages": [
+        {
+          "laterClass": [
+            65822
+          ]
+        },
+        {
+          "always": [
+            65792
+          ]
+        },
+        {
+          "startingClass": [
+            65797
+          ],
+          "laterClass": [
+            65824
+          ]
+        },
+        {
+          "always": [
+            65798
+          ]
+        },
+        {
+          "always": [
+            65799
+          ]
+        },
+        {
+          "always": [
+            65800
+          ]
+        },
+        {
+          "always": [
+            65801
+          ]
+        }
+      ]
+    },
+    {
+      "classJobId": 5,
+      "verifiedComplete": true,
+      "stages": [
+        {
+          "laterClass": [
+            65755
+          ]
+        },
+        {
+          "always": [
+            65582
+          ]
+        },
+        {
+          "startingClass": [
+            65603
+          ],
+          "laterClass": [
+            65670
+          ]
+        },
+        {
+          "always": [
+            65604
+          ]
+        },
+        {
+          "always": [
+            65606
+          ]
+        },
+        {
+          "always": [
+            65607
+          ]
+        },
+        {
+          "always": [
+            65612
+          ]
+        }
+      ]
+    },
+    {
+      "classJobId": 7,
+      "verifiedComplete": true,
+      "stages": [
+        {
+          "laterClass": [
+            65882
+          ]
+        },
+        {
+          "always": [
+            65883
+          ]
+        },
+        {
+          "startingClass": [
+            65884
+          ],
+          "laterClass": [
+            65885
+          ]
+        },
+        {
+          "always": [
+            65886
+          ]
+        },
+        {
+          "always": [
+            65887
+          ]
+        },
+        {
+          "always": [
+            65888
+          ]
+        },
+        {
+          "always": [
+            65889
+          ]
+        }
+      ]
+    },
+    {
+      "classJobId": 29,
+      "verifiedComplete": true,
+      "stages": [
+        {
+          "always": [
+            65640
+          ]
+        },
+        {
+          "always": [
+            65646
+          ]
+        },
+        {
+          "always": [
+            65662
+          ]
+        },
+        {
+          "always": [
+            65680
+          ]
+        },
+        {
+          "always": [
+            65681
+          ]
+        },
+        {
+          "always": [
+            65682
+          ]
+        },
+        {
+          "always": [
+            65684
+          ]
+        },
+        {
+          "always": [
+            65690
+          ]
+        },
+        {
+          "always": [
+            65691
+          ]
+        }
+      ]
+    }
+  ]
+}

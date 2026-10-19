@@ -222,7 +222,7 @@
     "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
-    "version": "1.3.7.1",
+    "version": "1.4.0",
     "restore": {
       "projectUniqueName": "D:\\Code\\FFXIV Plugins\\CustomQuestGuide\\CustomQuestGuide.csproj",
       "projectName": "CustomQuestGuide",

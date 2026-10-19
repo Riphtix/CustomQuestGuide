@@ -1,3 +1,201 @@
+## v1.4.0.0 — Journal classification diagnostic (development)
+
+- Adds a manual, read-only export of Lumina Quest -> JournalGenre -> JournalCategory -> JournalSection relationships, quest dependencies, job metadata, and character quest flags.
+- No changes to runtime progression, ownership checks, event listeners, or network requests.
+- Intended as temporary Task #10 diagnostic before replacing the old resolver.
+
+## v1.4.0.0 — Task #10 on-demand discovery diagnostics
+
+- Detect missing external class folders separately from network failures.
+- Resolve external folder paths from the source directory metadata instead of assuming an abbreviation path exists.
+- Report HTTP/parsing errors in discovery status and plugin log.
+- Cache successful candidates only; do not turn candidates into verified progression.
+- Use different retry delays for missing coverage and transient failures.
+- No per-frame network calls, no changes to unlock/progression evaluator.
+
+## v1.4.0.0 — Task #10: on-demand reference discovery (development)
+
+- Start target-scoped asynchronous discovery of external class quest candidates when a class with no verified chain is selected.
+- Persist candidate IDs and source URL in a local JSON cache; 30-day positive cache and 30-minute retry delay on failure.
+- Never promote third-party folder contents to verified chains without an independent completeness and eligibility check.
+- Preserve already-validated chain behavior and avoid network work inside UI rendering.
+- Current scope: ARR class paths in Questionable. This is candidate discovery, NOT the final general verifier; other classes/jobs continue to report unavailable.
+
+## v1.4.0.0 — Task #10: strict verified-catalog groundwork (development)
+
+- Removed runtime class/job quest-membership guessing by prerequisite graph and class/job-category heuristics.
+- Removed language-specific progression filtering by quest-title patterns.
+- Missing verified progression data is explicitly unavailable, never an empty completed chain.
+- Retains existing level/soul-crystal unlock detection and event monitoring.
+- This is a safety-oriented foundation: the verified manifest is not yet populated and progression guidance is unavailable pending offline validation.
+
+## v1.4.0.0 — Task 10: disconnected base-class quest graph regression fix (development)
+
+- Restore attributed class quest guidance only for base classes whose unlock graph has no usable successor edges, preventing false 0/0 progression displays.
+- Retain strict connected-graph behavior for derived jobs to avoid reintroducing unrelated relic and role quests.
+- The fallback is provisional: class-specific attribution still requires validation against quest family metadata.
+
+## v1.4.0.0 — Task #10 quest graph connectivity correction (development)
+
+- Formal progression now includes only class/job-attributed quests reachable from a resolved unlock root through predecessor relationships.
+- Remove the erroneous unconditional inclusion of every job-attributed quest after graph traversal.
+- No fallback to unrelated quests when a progression chain cannot be established; unresolved guidance remains unavailable pending validation.
+- Traversal uses a precomputed adjacency index rather than repeatedly walking the full candidate collection.
+- In-game verification remains necessary: disconnected legitimate quest branches may require explicit game-data anchors.
+
+## v1.4.0.0 — Task #10 unified class/job quest classification (development)
+
+- Classify quest rows into applicable progression, unlock prerequisite, class unlock, inapplicable variant, or unrelated.
+- Use the same classified applicable sequence for progression counts, next-quest guidance, and pin progress.
+- Require raw confirmed quest completion for formal progress; never infer completion from a derived job or quest sequence.
+- Extend the manual progression audit with starting-class ID, authoritative unlock state, and excluded quest IDs/reasons.
+- Maintain soul-crystal-based job unlock detection, no additional polling or network work.
+
+## v1.4.0.0 — Quest eligibility correction (Task #10 development)
+
+- Exclude base-class introductory `So You Want to Be ...` and `Way of the ...` quests from formal progression; unlock is determined from class level independently.
+- Exclude `My First ...` guild quests only for the character's actual starting class (`IPlayerState.FirstClass`).
+- Preserve applicable later-class guild quests and the previously identified mutually exclusive Archer level-10 branches.
+- Export explicit exclusion reasons in the temporary raw quest-flag diagnostic; no polling or network traffic.
+- Duplicate-name quest records still require quest-ID/eligibility investigation when reported; do not silently infer completion.
+
+## v1.4.0.0 — Starting-class-aware progression (Task #10 development)
+
+- Use Dalamud IPlayerState.FirstClass to select applicable starting-class quest variants.
+- Exclude inapplicable Archer level-10 branch quests rather than marking them completed.
+- Exclude the separately tracked unlock quest and starting-city MSQ from formal class progression.
+- Share filtering across on-screen counts, next quest selection, pin handoffs, and diagnostics.
+- Cache filtered quest lists per class and original starting class. No polling or network traffic.
+- Other starting-class-specific quest variants require evidence before extending the rules.
+
+## v1.4.0.0 — Task #10 authoritative job-state correction (development)
+
+- Unlock base classes using their nonzero class level; jobs, including expansion jobs, require their matching soul crystal in accessible game inventory.
+- Require every indexed quest to have a confirmed Completed flag before class/job progression is complete. No completion inferred from a derived job unlock, level, or empty quest list.
+- Apply the same rule to pinned automatic transitions and Jobs & Progression coloring and quest counts.
+- No added polling or network activity; preserve existing event-driven listeners and snapshot behavior.
+
+## v1.4.0.0 — Debug lifecycle audits (development)
+
+- Added five on-demand, read-only debug audit buttons: job progression, Arcanist branches, event coverage, pin lifecycle/Undo, and monitoring structure.
+- Exports are written to the plugin configuration directory; no network requests, simulated unlocks, or pin modifications.
+- Audit snapshots do not substitute for in-game event delivery or measured frame-time profiling.
+
+## v1.4.0.0 — Task #10: class quest coverage follow-up (development)
+
+- Read both Quest.ClassJobCategory0 and Quest.ClassJobCategory1 for specific class/job attribution.
+- Include independently class-attributed quests even when their PreviousQuest linkage does not reach the initial unlock quest, while excluding broad role-wide categories.
+- Preserve the verified soul-crystal rule for derived job unlocks and the base-class progression guard.
+- In-game verification required: confirm complete level 1–30 chains and appropriate next quest for THM/ROG/CNJ before additional class unlock tests.
+
+## v1.4.0.0 — Task #10: advanced-job soul crystal unlock verification (development)
+
+- Advanced ARR job unlocks require possession of the actual matching soul crystal, not base-class level or completed unlock quest alone.
+- Build an item-to-job soul-crystal lookup from local game sheets at startup; inventory changes trigger targeted job completion verification.
+- Snapshot-based UI job ownership reflects crystals captured during the existing explicit ownership pass.
+- A missing crystal mapping fails closed rather than incorrectly marking a job unlocked.
+
+### v1.4.0.0 — Class quest chain discovery fix (Task #10)
+
+- Accept single-job or base-class/derived-job ClassJobCategory relationships when building quest progression, rather than discarding all multi-job categories.
+- Limit multi-job categories to the exact class/job family to avoid unrelated role quests.
+- Preserve quest prerequisite graph and existing live unlock verification.
+
+## v1.4.0.0 — Task #10 base-class progression guard (development)
+
+- Prevent a newly unlocked level-1 base class from instantly completing its progression stage and skipping to the derived job.
+- Require level 30 and a verifiable post-unlock quest chain before the class stage can auto-complete; an actually unlocked derived job also confirms class completion.
+- Use a targeted live class-level read without launching an ownership scan; no polling or network calls.
+- Note: unresolved post-unlock quest chains remain pinned rather than advancing prematurely.
+
+## v1.4.0.0 — Lancer/class unlock event fix (development)
+
+- Observe Dalamud unlock and quest-toast events to queue targeted class/job pin checks.
+- Verify job unlocks directly against live class-job levels, rather than stale /cqg ownership snapshots.
+- No timer, polling, network requests, or full ownership scan added.
+
+## v1.4.0.0 — Task #10 class-to-job transitions (development)
+
+- Base class quest progression hands off to its derived job unlock, or directly to job progression when already unlocked.
+- Retain exact wishlist priority and sticky/completion settings, deduplicate matching destination pins, and support existing 30-second Undo.
+- React to a derived job change when a base class progression pin is still tracked. No polling or network calls added.
+
+## v1.4.0.0 — QoL task #10 (development)
+
+- Hand off verified unlocked job pins to job progression at the same wishlist priority.
+- Reuse an existing progression pin rather than duplicating it.
+- Reverse the handoff through the 30-second Undo command/button.
+- Honor Sticky pins and auto-unpin preferences; use existing event-driven verification.
+
+## v1.4.0.0 — QoL task #9: quantity-aware reacquisition (development)
+
+- Recheck multiple relevant changed inventory item IDs in one loaded-container pass rather than repeating a container sweep per ID.
+- Compare verified held counts across inventory events: stack rearrangements and equal/decreased quantities no longer trigger *new* acquisition completion. A later increase can complete the goal when the desired quantity is reached.
+- Continue to evaluate explicit quantity-goal edits immediately, and reconcile currently held quantities once at login.
+- Keep zero-count updates so falling below the goal re-arms a restored pin for future reacquisition.
+- Reset event-count baselines on login; no network requests or full item catalog scan.
+- Quantity means currently accessible copies, not historical total; inaccessible retainers are excluded.
+
+## v1.4.0.0 — QoL task #8: automatic unpin refinement (development)
+
+- Scope inventory completion processing to indexed pins associated with changed item IDs.
+- Keep multiple automatic removals within the active 30-second window in one Undo operation, preserving original priority positions.
+- Keep automatic-unpin configuration and Sticky exemptions intact; no new scanning, polling, or network calls.
+
+## v1.4.0.0 — QoL task #7 (development): event-driven completion triggers
+
+- React to job changes and level changes with targeted completion checks for pinned job unlock/progression targets.
+- React to territory transitions with bounded checks for pinned duty unlocks. Merely entering a duty does not mark it complete; the existing authoritative unlock predicate must pass.
+- Prioritize triggered work and process at most three non-item verifications per framework update, without recurring polling.
+- Verify only the queued pin instead of scanning every pin for each non-item completion check.
+- Preserve inventory change monitoring, Sticky Pins, quantity goals, notification settings and Undo.
+- No new network requests. Build and in-game verification are still required.
+
+## v1.4.0.0 — QoL task #6: Undo refinement (development)
+
+- Restoring an automatically removed completed pin no longer immediately unpins it on subsequent verification.
+- An undone item is eligible for auto-unpin again after its confirmed accessible inventory quantity falls below the goal; non-item completions remain protected for the current plugin session.
+- Retain the 30-second Undo command, Wishlist button, pin priority, Sticky status, and quantity goals.
+
+## v1.4.0.0 — Task #5 follow-up: /cqg undo (development)
+
+- Add `/cqg undo` for the existing 30-second automatic-unpin undo buffer.
+- Reuse one restore method for chat command and Wishlist Undo button; preserve original priority and pin settings.
+- Skip UI opening and ownership scan for the undo command, and report success or expiration directly in chat.
+- Mention `/cqg undo` in completion messages and Help.
+
+## v1.4.0.0 — Task #5: completion chat notification refinement (development)
+
+- Use target-appropriate verbs (obtained / unlocked / completed) in completion chat notifications.
+- Print clear removed-vs-retained outcomes and the 30-second Wishlist Undo guidance.
+- Cap chat bursts at three individually named messages plus one summary **per batch**, rather than permanently suppressing further Sticky completions after three messages in a session.
+- Respect the existing notifications preference; no new scanning, network requests, or polling.
+
+## v1.4.0.0 — Task #4: quantity goals (development)
+
+- Add persisted per-item DesiredQuantity (0 = previous ownership rule).
+- Add compact + / editable number / - quantity control on the Wishlist for item pins.
+- Count accessible physical inventory quantities after login (one filtered sweep) and on relevant inventory changes only.
+- Complete quantity pins only when verified accessible count reaches the requested total; Sticky pins remain exempt from auto-unpin.
+- Quantity progress counts currently accessible copies, not lifetime drops. Unavailable retainer containers cannot be counted.
+- Existing chat notification, Undo and 500-pin behavior retained. Source has not been compiled or tested in-game.
+
+## v1.4.0.0 — Completion settings functional integration (development)
+
+- Connect saved auto-unpin and chat-notification preferences to confirmed completed pins.
+- On login, perform one target-filtered inventory sweep; on relevant inventory changes, perform only an indexed target verification.
+- Preserve Sticky pins and 500-pin cap; unpin other confirmed completed targets and offer a 30-second Undo on the Wishlist.
+- Reconcile non-inventory completions after an explicit /cqg ownership scan, in small frame-bounded batches.
+- No network calls, repeated inventory polling, per-frame target scans, or acquisition-source resolution from inventory events.
+- This is source-only and has not been compiled or tested in FFXIV; class/job handoff remains a future task.
+
+## v1.4.0.0 — Task #3: completion preferences (development)
+
+- Add saved auto-unpin and completion chat notification preferences, both enabled by default.
+- Provide a collapsible Completion settings section on the compact Wishlist and explain settings in Help.
+- Settings are intentionally inactive until verified completion detection is implemented later.
+- Preserve Sticky Pins, the 500-pin cap, and existing scanning/network behavior.
+
 # v1.3.7.1 — duty identity/level hotfix
 
 - Duty display labels now identify treasure-map instances as `Treasure Dungeon`, e.g. `Treasure Dungeon: The Dungeons of Lyhe Ghiah - Lv. 1`, instead of falling back to generic `Duty`.
@@ -307,3 +505,10 @@
 - Fixed the Need/Greed title fallback marker using the full text-node width, which could place the badge over the window close button.
 - The fallback now anchors from the actual rendered item-name width inside the centered text node.
 - Reworked T/S markers to use a dark badge with a colored target/set ring and white glyph for much stronger contrast.
+
+### Task #10 diagnostic UI cleanup (development)
+- Replaced horizontal audit-button rows with report-group/report dropdowns and one explicit Export action.
+- Replaced lifecycle audit button stack with a report dropdown and one Export action.
+- Preserved existing exports and on-demand execution; no change to resolver, quest verification or pin behavior.
+
+- Compact debug report dropdowns for normal-sized windows; first-open default 820x600 (resizable).

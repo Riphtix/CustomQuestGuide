@@ -145,7 +145,7 @@ public sealed partial class Plugin
 
     private void RefreshRestoredTarget()
     {
-        if (activeTab == MainTab.Items && !string.IsNullOrWhiteSpace(config.SelectedSetId) &&
+        if (activeTab == MainTab.Sets && !string.IsNullOrWhiteSpace(config.SelectedSetId) &&
             setCatalog.Get(config.SelectedSetId) is { } set)
         {
             var members = set.ItemIds
@@ -201,20 +201,6 @@ public sealed partial class Plugin
     private void DrawItemsTab()
     {
         DrawCommonTargetControls();
-
-        var selectedSet = setCatalog.Get(config.SelectedSetId);
-
-        if (selectedSet is not null)
-        {
-            ImGui.Separator();
-            DrawSetSummary(selectedSet);
-
-            if (config.Detailed && !IsRelicSet(selectedSet))
-                DrawSetDetailed(selectedSet);
-
-            DrawDebugPanel(null, selectedSet);
-            return;
-        }
 
         if (config.SelectedCategory.Equals("Emotes", StringComparison.OrdinalIgnoreCase))
         {
@@ -427,55 +413,101 @@ public sealed partial class Plugin
             ? QuestProgressState.NotStarted
             : GetQuestStateByRowId(job.UnlockQuest.QuestId);
         var jobUnlocked = ownership.IsJobUnlocked(job.ClassJobId);
-        var unlockComplete = jobUnlocked || unlockState == QuestProgressState.Completed;
-        var progressionState = ResolveJobQuestSequence(job.Progression);
-        var derivedJobProof = GetUnlockedDerivedJob(job);
-        var progressionInferredComplete = derivedJobProof is not null;
-        var completedProgression = progressionInferredComplete
-            ? job.Progression.Count
-            : progressionState.Entries.Count(x => x.EffectiveState == QuestProgressState.Completed);
-        var nextEntry = progressionInferredComplete ? null : progressionState.CurrentOrNext;
-        var nextStep = nextEntry?.Info is { } nextInfo
-            ? job.Progression.FirstOrDefault(x => x.QuestId == nextInfo.QuestId)
-            : nextEntry is not null
-                ? job.Progression.FirstOrDefault(x => x.Name.Equals(nextEntry.Name, StringComparison.OrdinalIgnoreCase))
-                : null;
+        var unlockComplete = jobUnlocked; // Unlock is authoritative ownership, never an inferred quest-state shortcut.
+        var progressionState = ResolveJobQuestSequence(GetApplicableProgression(job));
+        var classProgressionProven = AreAllJobQuestsConfirmedComplete(job);
+        var completedProgression = CountConfirmedProgressionQuests(job);
+        // Guidance must follow the first quest not actually confirmed complete.
+        // Inferred sequence states are helpful elsewhere, but cannot prove
+        // formal class/job completion or skip an outstanding quest here.
+        var nextStep = GetNextConfirmedProgressionQuest(job);
+        var nextRawState = nextStep is null ? QuestProgressState.Completed :
+            GetQuestStateByRowId(nextStep.QuestId);
+
+        // Only present actions that are actionable for the current unlock state.
+        // A locked derived job first guides the player through any outstanding
+        // base-class progression gate instead of advertising its own job chain.
+        var parentJob = job.ParentClassJobId != 0 && job.ParentClassJobId != job.ClassJobId
+            ? jobCatalog.Get(job.ParentClassJobId)
+            : null;
+        var missingParentUnlock = GetMissingBaseClassUnlock(job);
+        var missingParentProgression = GetMissingBaseClassProgression(job) is not null;
 
         ImGui.Spacing();
-        DrawPinToggle("JobUnlock", job.ClassJobId, string.Empty, "Pin Unlock", "Unpin Unlock");
-        ImGui.SameLine();
-        DrawPinToggle("JobProgression", job.ClassJobId, string.Empty, "Pin Progression", "Unpin Progression");
+        if (!unlockComplete)
+        {
+            if (missingParentUnlock is not null)
+            {
+                ImGui.TextUnformatted($"Requires {missingParentUnlock.Name} Unlock");
+                ImGui.SameLine();
+                if (ImGui.Button($"Open##job-base-unlock-{job.ClassJobId}"))
+                {
+                    SelectJobTarget(missingParentUnlock);
+                    targetSearch = string.Empty;
+                }
+                ImGui.SameLine();
+                DrawPinToggle("JobUnlock", missingParentUnlock.ClassJobId, string.Empty,
+                    "Pin Unlock", "Unpin Unlock",
+                    prerequisiteForKind: "JobUnlock", prerequisiteForNumericId: job.ClassJobId);
+            }
+            else if (missingParentProgression && parentJob is not null)
+            {
+                ImGui.TextUnformatted($"Requires {parentJob.Name} Progression");
+                ImGui.SameLine();
+                if (ImGui.Button($"Open##job-requires-{job.ClassJobId}-{parentJob.ClassJobId}"))
+                {
+                    SelectJobTarget(parentJob);
+                    targetSearch = string.Empty;
+                }
+                ImGui.SameLine();
+                // The selected job is locked: this is explicitly a prerequisite action,
+                // not the locked job's own progression control. Only the unlocked
+                // parent class may receive a progression pin.
+                if (ownership.IsJobUnlocked(parentJob.ClassJobId))
+                    DrawPinToggle("JobProgression", parentJob.ClassJobId, string.Empty,
+                        "Pin Prerequisite", "Unpin Prerequisite",
+                        prerequisiteForKind: "JobUnlock", prerequisiteForNumericId: job.ClassJobId);
+            }
+            else
+                DrawPinToggle("JobUnlock", job.ClassJobId, string.Empty, "Pin Unlock", "Unpin Unlock");
+        }
+        else if (!classProgressionProven)
+            DrawPinToggle("JobProgression", job.ClassJobId, string.Empty, "Pin Progression", "Unpin Progression");
 
         ImGui.Spacing();
         DrawColoredText("Unlock:", unlockComplete);
         ImGui.SameLine();
-        if (job.UnlockQuest is null)
+        if (unlockComplete)
+            DrawColoredText("Unlocked", true);
+        else if (missingParentUnlock is not null)
+            ImGui.TextDisabled($"Requires {missingParentUnlock.Name} unlock.");
+        else if (missingParentProgression)
         {
-            ImGui.TextDisabled("No explicit unlock quest relation found in the current game data.");
+            ImGui.TextDisabled("Prerequisite class progression required.");
+            // Show independent prerequisites without advertising the job unlock
+            // quest giver before the base-class gate is met.
+            foreach (var requirement in job.UnlockPrerequisites.Where(requirement =>
+                !IsQuestCompleteByRowId(requirement.QuestId) &&
+                (parentJob is null || !GetApplicableProgression(parentJob)
+                    .Any(step => step.QuestId == requirement.QuestId))))
+                ImGui.BulletText($"[ ] {requirement.Name}");
         }
+        else if (job.UnlockQuest is null)
+            ImGui.TextDisabled("Unlock quest location unavailable.");
         else
         {
             var levelText = job.UnlockQuest.Level > 0 ? $"Lv. {job.UnlockQuest.Level} — " : string.Empty;
-            DrawColoredText($"{levelText}{job.UnlockQuest.Name}", unlockComplete);
+            DrawColoredText($"{levelText}{job.UnlockQuest.Name}", false);
             ImGui.SameLine();
-            if (unlockComplete)
-                DrawColoredText("[Unlocked]", true);
-            else
-                ImGui.TextDisabled(unlockState == QuestProgressState.InProgress ? "[In progress]" : "[Not started]");
-
+            ImGui.TextDisabled(unlockState == QuestProgressState.InProgress ? "[In progress]" : "[Not started]");
             if (!string.IsNullOrWhiteSpace(job.UnlockQuest.QuestGiver))
             {
-                var prefix = unlockComplete
-                    ? "Unlocked via"
-                    : unlockState == QuestProgressState.InProgress
-                        ? "Quest started by"
-                        : "Go to";
+                var prefix = unlockState == QuestProgressState.InProgress ? "Quest started by" : "Go to";
                 if (!string.IsNullOrWhiteSpace(job.UnlockQuest.Location))
                     DrawNpcLocationLine(prefix, job.UnlockQuest.QuestGiver!, job.UnlockQuest.Location, $"job-unlock-{job.ClassJobId}");
                 else
                     ImGui.TextDisabled($"{prefix}: {job.UnlockQuest.QuestGiver}");
             }
-
             if (job.UnlockPrerequisites.Count > 0)
             {
                 ImGui.TextDisabled("Prerequisite quest(s):");
@@ -487,19 +519,43 @@ public sealed partial class Plugin
             }
         }
 
-        ImGui.Spacing();
-        DrawColoredText(
-            $"Formal progression: {completedProgression} / {job.Progression.Count} quests complete",
-            job.Progression.Count > 0 && (progressionState.IsComplete || progressionInferredComplete));
-        if (progressionInferredComplete && derivedJobProof is not null)
+        // A locked job must not offer independent job progression guidance.
+        // The unlock quest belongs to unlock guidance until actually completed.
+        if (!unlockComplete)
         {
-            ImGui.TextDisabled(
-                $"Class progression complete — inferred from unlocked {derivedJobProof.Name} ({derivedJobProof.Abbreviation}).");
+            ImGui.Spacing();
+            ImGui.Separator();
+            if (ImGui.TreeNode($"Debug / journal evidence##job-debug-{job.ClassJobId}"))
+            {
+                ImGui.TextDisabled($"ClassJob row: {job.ClassJobId}");
+                ImGui.TextDisabled($"Snapshot job unlocked: {jobUnlocked}");
+                ImGui.TextWrapped(ownership.GetClassJobUnlockDiagnostics(job.ClassJobId));
+                ImGui.TextDisabled($"Unlock resolution: {job.UnlockResolution}");
+                ImGui.TextDisabled($"Unlock quest ID: {job.UnlockQuest?.QuestId}");
+                ImGui.TextDisabled($"Base class progression gate: {missingParentProgression}");
+                DrawJournalProgressionPreview(job);
+                ImGui.TreePop();
+            }
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        var completeCoverage = HasCompleteProgressionCoverage(job);
+        var progressionSteps = GetApplicableProgression(job);
+        if (progressionSteps.Count == 0)
+            ImGui.TextDisabled("Progression: Quest sequence not yet resolved");
+        else
+        {
+            var summary = $"Progression: {completedProgression} / {progressionSteps.Count} quests complete";
+            if (!completeCoverage)
+                summary += " (partial sequence)";
+            DrawColoredText(summary, completeCoverage && classProgressionProven);
         }
         if (nextStep is not null)
         {
             var nextLevel = nextStep.Level > 0 ? $"Lv. {nextStep.Level} — " : string.Empty;
-            var active = progressionState.Active is not null;
+            var active = nextRawState == QuestProgressState.InProgress;
             ImGui.TextWrapped($"{(active ? "Current quest" : "Next quest")}: {nextLevel}{nextStep.Name}");
             if (!string.IsNullOrWhiteSpace(nextStep.QuestGiver))
             {
@@ -510,20 +566,19 @@ public sealed partial class Plugin
                     ImGui.TextDisabled($"{prefix}: {nextStep.QuestGiver}");
             }
         }
-        else if (job.Progression.Count > 0)
+        else if (progressionSteps.Count > 0)
         {
-            ImGui.TextDisabled("Formal class/job quest progression complete.");
+            ImGui.TextDisabled(classProgressionProven
+                ? "All class/job progression quests complete."
+                : completeCoverage ? "No next quest available; completion not confirmed." :
+                    "Further quests are unresolved; see Debug / journal evidence.");
         }
 
         ImGui.Spacing();
-        for (var i = 0; i < job.Progression.Count; i++)
+        for (var i = 0; i < progressionSteps.Count; i++)
         {
-            var step = job.Progression[i];
-            var state = progressionInferredComplete
-                ? QuestProgressState.Completed
-                : i < progressionState.Entries.Count
-                    ? progressionState.Entries[i].EffectiveState
-                    : GetQuestStateByRowId(step.QuestId);
+            var step = progressionSteps[i];
+            var state = GetQuestStateByRowId(step.QuestId);
             var marker = state == QuestProgressState.Completed ? "[X]" :
                 state == QuestProgressState.InProgress ? "[>]" : "[ ]";
             var level = step.Level > 0 ? $"Lv. {step.Level} — " : string.Empty;
@@ -543,16 +598,31 @@ public sealed partial class Plugin
             }
         }
 
-        if (config.Detailed)
+        ImGui.Spacing();
+        ImGui.Separator();
+        if (ImGui.TreeNode($"Debug / journal evidence##job-debug-{job.ClassJobId}"))
         {
-            ImGui.Spacing();
-            ImGui.Separator();
             ImGui.TextDisabled($"ClassJob row: {job.ClassJobId}");
+            if (job.UnlockQuest is not null)
+                ImGui.TextDisabled($"Unlock quest: {job.UnlockQuest.QuestId} — {job.UnlockQuest.Name}");
+            ImGui.TextDisabled($"Unlock prerequisites: {job.UnlockPrerequisites.Count}");
             ImGui.TextDisabled($"Live job unlocked: {ownership.IsJobUnlocked(job.ClassJobId)}");
+            ImGui.TextDisabled(ownership.GetClassJobUnlockDiagnostics(job.ClassJobId));
             ImGui.TextDisabled($"Unlock resolution: {job.UnlockResolution}");
             ImGui.TextDisabled($"ClassJob.UnlockQuest row: {job.ClassJobUnlockQuestId}");
-            ImGui.TextDisabled($"Formal quest nodes: {job.Progression.Count}");
+            ImGui.TextDisabled($"Formal quest nodes: {progressionSteps.Count}");
+            ImGui.TextDisabled($"Complete progression coverage: {completeCoverage}");
+            ImGui.TextDisabled($"Verified catalog: {jobCatalog.GetVerifiedApplicableQuestIds(job.ClassJobId, PlayerStateService.IsLoaded ? PlayerStateService.FirstClass.RowId : 0u) is not null}");
+            var prefix = ResolveObservedJournalPrefix(job);
+            ImGui.TextDisabled($"Resolved prefix: {prefix.Steps.Count} quests — {prefix.Detail}");
+            ImGui.TextDisabled($"Journal candidates: {jobCatalog.GetJournalCandidates(job.ClassJobId).Count} (membership not independently verified)");
+            var journalAnalysis = jobCatalog.AnalyzeJournalPath(job.ClassJobId);
+            ImGui.TextWrapped($"Journal graph: {journalAnalysis.Status} — {journalAnalysis.Detail}");
+            ImGui.TextDisabled("Detailed route decisions are in Debug > journal audits.");
+            DrawJournalProgressionPreview(job);
+            ImGui.TreePop();
         }
+
     }
 
     private void DrawDutiesTab()

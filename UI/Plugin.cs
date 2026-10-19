@@ -94,6 +94,7 @@ public sealed partial class Plugin : IDalamudPlugin
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
+    [PluginService] internal static ITextureProvider TextureProvider { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IGameInventory GameInventory { get; private set; } = null!;
     [PluginService] internal static IPlayerState PlayerStateService { get; private set; } = null!;
@@ -103,6 +104,7 @@ public sealed partial class Plugin : IDalamudPlugin
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 #pragma warning disable Dalamud001
     [PluginService] internal static IUnlockState UnlockState { get; private set; } = null!;
+    [PluginService] internal static IToastGui ToastGui { get; private set; } = null!;
 #pragma warning restore Dalamud001
 
     private readonly Configuration config;
@@ -262,6 +264,7 @@ public sealed partial class Plugin : IDalamudPlugin
 
         BuildQuestCache();
         RepairSelection();
+        PrimeFocusedIconsOnStartup();
 
         // Materialize these once so each startup ownership sample does not rebuild
         // the full target/job ID sequences.
@@ -285,10 +288,19 @@ public sealed partial class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += OpenMainWindow;
         PluginInterface.UiBuilder.OpenMainUi += OpenMainWindow;
 
+        GameInventory.InventoryChangedRaw += OnPinnedInventoryChanged;
         ClientState.Login += OnLogin;
+        UnlockState.Unlock += OnPinnedUnlockObserved;
+        ToastGui.QuestToast += OnPinnedQuestToast;
+        ClientState.ClassJobChanged += OnPinnedClassJobChanged;
+        ClientState.LevelChanged += OnPinnedLevelChanged;
+        ClientState.TerritoryChanged += OnPinnedTerritoryChanged;
         Framework.Update += OnFrameworkUpdate;
         if (ClientState.IsLoggedIn)
+        {
             PrintStartupMessage();
+            pinnedCompletionNeedsLoginReconcile = true;
+        }
     }
 
     public void Dispose()
@@ -296,8 +308,15 @@ public sealed partial class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= Draw;
         PluginInterface.UiBuilder.OpenConfigUi -= OpenMainWindow;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainWindow;
+        GameInventory.InventoryChangedRaw -= OnPinnedInventoryChanged;
         ClientState.Login -= OnLogin;
+        UnlockState.Unlock -= OnPinnedUnlockObserved;
+        ToastGui.QuestToast -= OnPinnedQuestToast;
+        ClientState.ClassJobChanged -= OnPinnedClassJobChanged;
+        ClientState.LevelChanged -= OnPinnedLevelChanged;
+        ClientState.TerritoryChanged -= OnPinnedTerritoryChanged;
         Framework.Update -= OnFrameworkUpdate;
+        ReleaseUnusedFocusedIconRentals(new HashSet<uint>());
         CommandManager.RemoveHandler(CommandName);
         collectibleSources.Dispose();
         onlineStoreLookup.Dispose();
@@ -308,7 +327,16 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void OnLogin()
     {
+        PrimeFocusedIconsOnStartup();
         PrintStartupMessage();
+        pinnedCompletionNeedsLoginReconcile = true;
+        pinnedCompletionIndexDirty = true;
+        pendingCompletionItems.Clear();
+        pendingExplicitQuantityRechecks.Clear();
+        pinnedItemQuantityCounts.Clear();
+        pendingEventCompletionPins.Clear();
+        completionReconciliationQueue.Clear();
+        notifiedStickyCompletions.Clear();
     }
 
     private IEnumerable<uint> BuildSelectedOwnershipItemIds()
@@ -376,6 +404,11 @@ public sealed partial class Plugin : IDalamudPlugin
         if (!ClientState.IsLoggedIn)
             return;
 
+        // Completion handling is event-driven, and does no ownership work when
+        // there are no relevant pending events. The first login pass is one
+        // target-filtered container sweep, not the full /cqg ownership scan.
+        ProcessPendingPinnedCompletions();
+
         // Selected-source recovery is lifecycle work, not rendering work. Keep
         // it on the framework update path so drawing the UI never causes hidden
         // network side effects. Only the item currently visible in CQG is
@@ -409,6 +442,7 @@ public sealed partial class Plugin : IDalamudPlugin
             {
                 ownership.FinishPolling();
                 ownershipPollingActive = false;
+                QueueCompletedPinReconciliation();
             }
         }
         catch (Exception ex)
@@ -432,6 +466,16 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void OnCommand(string command, string args)
     {
+        // Undo does not open the UI or trigger an ownership scan.
+        if (string.Equals(args?.Trim(), "undo", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryUndoLastAutomaticRemoval(out var restored))
+                ChatGui.Print($"[CQG] Undo successful: restored {restored} pin(s) to the watchlist.");
+            else
+                ChatGui.Print("[CQG] Nothing to undo. Automatic removals can be undone for 30 seconds.");
+            return;
+        }
+
         // The slash command starts one complete background ownership refresh. The
         // expensive work is spread across later framework updates rather than
         // running synchronously on the command frame.
@@ -502,11 +546,12 @@ public sealed partial class Plugin : IDalamudPlugin
         // The loot-window marker is independent of the CQG main window and must
         // remain visible while Need/Greed is open even when CQG itself is closed.
         DrawLootTargetIndicators();
+        DrawFocusedTrackingOverlays();
 
         if (!windowOpen)
             return;
 
-        ImGui.SetNextWindowSize(new Vector2(780, 600), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(820, 600), ImGuiCond.FirstUseEver);
 
         if (!ImGui.Begin("Custom Quest Guide###CustomQuestGuide", ref windowOpen))
         {
@@ -518,6 +563,8 @@ public sealed partial class Plugin : IDalamudPlugin
         DrawNavigationHistoryControls();
         if (activeTab == MainTab.Items)
             DrawItemsNavigation();
+        else if (activeTab == MainTab.Sets)
+            DrawSetsNavigation();
         else if (activeTab is MainTab.Jobs or MainTab.Duties)
             DrawUnifiedTargetSelector();
         ImGui.Separator();
@@ -529,6 +576,9 @@ public sealed partial class Plugin : IDalamudPlugin
                 break;
             case MainTab.Duties:
                 DrawDutiesTab();
+                break;
+            case MainTab.Sets:
+                DrawSetsTab();
                 break;
             case MainTab.Pins:
                 DrawPinnedTargetsTab();
@@ -550,6 +600,10 @@ public sealed partial class Plugin : IDalamudPlugin
             activeTab = MainTab.Items;
 
         ImGui.SameLine();
+        if (ImGui.Button(activeTab == MainTab.Sets ? "[ Sets ]" : "Sets"))
+            activeTab = MainTab.Sets;
+
+        ImGui.SameLine();
         if (ImGui.Button(activeTab == MainTab.Jobs ? "[ Jobs & Progression ]" : "Jobs & Progression"))
             activeTab = MainTab.Jobs;
 
@@ -558,7 +612,7 @@ public sealed partial class Plugin : IDalamudPlugin
             activeTab = MainTab.Duties;
 
         ImGui.SameLine();
-        if (ImGui.Button(activeTab == MainTab.Pins ? $"[ Pinned Targets ({config.PinnedTargets.Count}) ]" : $"Pinned Targets ({config.PinnedTargets.Count})"))
+        if (ImGui.Button(activeTab == MainTab.Pins ? $"[ Watchlist ({config.PinnedTargets.Count}/{PinnedTargetPolicy.MaximumPins}) ]" : $"Watchlist ({config.PinnedTargets.Count}/{PinnedTargetPolicy.MaximumPins})"))
         {
             if (activeTab != MainTab.Pins)
             {
@@ -583,7 +637,8 @@ public sealed partial class Plugin : IDalamudPlugin
         ImGui.TextUnformatted("Quick command");
         ImGui.Separator();
         ImGui.BulletText("/cqg opens Custom Quest Guide.");
-        ImGui.BulletText("/cqg <target name or item ID> searches items, permanent unlocks, jobs, and duties; sets are chosen from the separate Set dropdown on the Items tab.");
+        ImGui.BulletText("/cqg undo restores the last auto-removed pin(s) within 30 seconds, without opening CQG.");
+        ImGui.BulletText("/cqg <target name or item ID> searches items, permanent unlocks, jobs, and duties; sets are selected from the dedicated Sets tab.");
 
         ImGui.Spacing();
         ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
@@ -591,6 +646,12 @@ public sealed partial class Plugin : IDalamudPlugin
         ImGui.PopStyleColor();
 
         ImGui.Spacing();
+        ImGui.TextUnformatted("Watchlist completion preferences");
+        ImGui.Separator();
+        ImGui.TextWrapped("Watchlist > Completion settings controls automatic unpinning and completion chat notices. Sticky pins are always kept. Inventory acquisition reacts to relevant game events; other completion types reconcile after a /cqg ownership scan.");
+        ImGui.BulletText("Sticky targets remain pinned after completion even when automatic unpinning is enabled.");
+        ImGui.Spacing();
+
         ImGui.TextUnformatted("Color meanings");
         ImGui.Separator();
         DrawHelpColorRow(OwnedGreen, "Green", "Owned or complete. For jobs, green means the job is unlocked and all tracked formal progression is complete.");
@@ -806,7 +867,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 var ownedStatus = ownership.GetItemStatus(target.ItemId);
                 var resolved = resolver.HasDirectSource(target);
                 if (ownedStatus.IsOwned)
-                    ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(ownedStatus) ? GlamourPink : OwnedGreen);
+                    ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(ownedStatus));
                 else if (!resolved)
                     ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
 
@@ -878,7 +939,7 @@ public sealed partial class Plugin : IDalamudPlugin
                     var ownedStatus = ownership.GetItemStatus(target.ItemId);
                     var resolved = resolver.HasDirectSource(target);
                     if (ownedStatus.IsOwned)
-                        ImGui.PushStyleColor(ImGuiCol.Text, IsGlamourDresserOwnership(ownedStatus) ? GlamourPink : OwnedGreen);
+                        ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(ownedStatus));
                     else if (!resolved)
                         ImGui.PushStyleColor(ImGuiCol.Text, UnresolvedRed);
                     if (ImGui.Selectable($"[Item] {target.Name}##item-current-{target.ItemId}"))
@@ -959,7 +1020,7 @@ public sealed partial class Plugin : IDalamudPlugin
             {
                 config.SelectedSetId = string.Empty;
                 config.SelectedRelicJob = string.Empty;
-                activeTab = MainTab.Items;
+                activeTab = MainTab.Sets;
             });
             ImGui.CloseCurrentPopup();
         }
@@ -1238,7 +1299,7 @@ public sealed partial class Plugin : IDalamudPlugin
         {
             config.SelectedSetId = set.Id;
             config.SelectedRelicJob = relicJob ?? string.Empty;
-            activeTab = MainTab.Items;
+            activeTab = MainTab.Sets;
         });
 
         var members = set.ItemIds
@@ -1429,6 +1490,7 @@ public sealed partial class Plugin : IDalamudPlugin
         // route shown on the Pins tab. Drop its snapshot eagerly; the next draw
         // rebuilds once, then the tab remains stable for another 30 seconds.
         pinnedUiDerivedCache.Clear();
+        pinnedCompletionIndexDirty = true;
         nextPinnedUiRefreshUtc = DateTime.UtcNow.Add(PinnedUiRefreshInterval);
 
         if (configPersistenceDisabled)
@@ -1448,6 +1510,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private enum MainTab
     {
         Items,
+        Sets,
         Jobs,
         Duties,
         Pins,
