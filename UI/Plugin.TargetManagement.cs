@@ -543,10 +543,10 @@ public sealed partial class Plugin
         if (set.Id.Equals("relic-phantom", StringComparison.OrdinalIgnoreCase))
             DrawPhantomRelicGuidance(selectedJob, filtered);
         else
-            DrawFilteredRelicGuidance(filtered);
+            DrawFilteredRelicGuidance(set, filtered);
     }
 
-    private void DrawFilteredRelicGuidance(IReadOnlyList<TargetEntry> members)
+    private void DrawFilteredRelicGuidance(TargetSet set, IReadOnlyList<TargetEntry> members)
     {
         var sequence = ResolveRelicQuestSequence(members);
         if (sequence.Entries.Count > 0)
@@ -584,6 +584,8 @@ public sealed partial class Plugin
             return;
         }
 
+        var attainedStages = GetEffectivelyOwnedSetItems(set, members);
+
         // No quest-backed stage relationship was exposed. Keep the resolver
         // fallback truthful rather than pretending a progression graph exists.
         foreach (var member in members)
@@ -591,14 +593,15 @@ public sealed partial class Plugin
             var result = resolver.Resolve(member);
             var source = result.Sources.FirstOrDefault();
             var owned = ownership.GetItemStatus(member.ItemId);
-            if (owned.IsOwned)
-                ImGui.PushStyleColor(ImGuiCol.Text, OwnedTextColor(owned));
-            ImGui.BulletText(owned.IsOwned
-                ? $"{member.Name} — Owned ({owned.Source})"
+            var attained = attainedStages.Contains(member.ItemId);
+            if (attained)
+                ImGui.PushStyleColor(ImGuiCol.Text, owned.IsOwned ? OwnedTextColor(owned) : OwnedGreen);
+            ImGui.BulletText(attained
+                ? owned.IsOwned ? $"{member.Name} — Owned ({owned.Source})" : $"{member.Name} — Earlier stage completed through upgrade"
                 : source is null
                     ? $"{member.Name} — No source resolved"
                     : $"{member.Name} — {source.Name}");
-            if (owned.IsOwned)
+            if (attained)
                 ImGui.PopStyleColor();
         }
     }
@@ -686,6 +689,8 @@ public sealed partial class Plugin
         ImGui.Spacing();
         ImGui.TextUnformatted("Selected weapon route");
 
+        var attainedStages = GetEffectivelyOwnedSetItems(setCatalog.Get("relic-phantom")!, members);
+
         // Show only stages that are currently actionable for this account. Previous
         // stages become repeat exchanges; the current frontier remains a quest
         // step. Future locked stages stay hidden from the default view.
@@ -700,7 +705,7 @@ public sealed partial class Plugin
                 continue;
 
             var itemNames = string.Join(" + ", stageItems.Select(x => x.Name));
-            var stageOwned = stageItems.All(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+            var stageOwned = stageItems.All(x => attainedStages.Contains(x.ItemId));
 
             if (state.Unlocked)
             {
@@ -1255,6 +1260,15 @@ public sealed partial class Plugin
         itemIds.Where(id => string.IsNullOrWhiteSpace(pin.Variant) ||
             catalog.GetById(id)?.EquipJobs.Contains(pin.Variant) == true).ToArray();
 
+    // Later stages of the same relic weapon imply earlier consumed stages.
+    // Other collections continue to use literal item ownership.
+    private HashSet<uint> GetEffectivelyOwnedSetItems(TargetSet set, IReadOnlyList<TargetEntry> members)
+    {
+        var owned = members.Where(member => ownership.GetItemStatus(member.ItemId).IsOwned)
+            .Select(member => member.ItemId).ToHashSet();
+        return RelicStageLineage.InferAttainedStages(set.Id, members, owned);
+    }
+
     private void RefreshFocusedTargetStates(IReadOnlyList<PinnedTargetConfig> focused)
     {
         var focusedJobIds = focused
@@ -1437,9 +1451,10 @@ public sealed partial class Plugin
                 .ToArray();
             if (members.Length > 0)
             {
-                var owned = members.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+                var owned = GetEffectivelyOwnedSetItems(set, members).Count;
                 var applicableIds = GetApplicableSetItemIds(pin, set.ItemIds);
-                progress = new PinnedProgressSnapshot("Collection progress", owned, applicableIds.Length, "owned");
+                progress = new PinnedProgressSnapshot("Collection progress", owned, applicableIds.Length,
+                    RelicStageLineage.UsesStages(set.Id) ? "stages" : "owned");
                 complete = applicableIds.Length > 0 && members.Length == applicableIds.Length &&
                     owned == applicableIds.Length;
             }
@@ -1698,7 +1713,7 @@ public sealed partial class Plugin
                 // with a positively matched job are applicable.
                 var applicableIds = GetApplicableSetItemIds(pin, set.ItemIds);
                 return applicableIds.Length > 0 && members.Length == applicableIds.Length &&
-                    members.All(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+                    GetEffectivelyOwnedSetItems(set, members).Count == applicableIds.Length;
             }
             case "JobUnlock":
                 return ownership.IsJobUnlocked(pin.NumericId);
@@ -2133,7 +2148,7 @@ public sealed partial class Plugin
                     }
                 }
 
-                var ownedCount = members.Count(x => ownership.GetItemStatus(x.ItemId).IsOwned);
+                var ownedCount = GetEffectivelyOwnedSetItems(set, members).Count;
                 // Never report a collection complete if its definition contains
                 // members not present in the target catalog (or a variant could
                 // not resolve to a valid member). Missing data is not ownership.

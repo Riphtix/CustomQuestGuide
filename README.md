@@ -1,4 +1,4 @@
-# Custom Quest Guide 1.3.7.1
+# Custom Quest Guide 1.4.0.1
 
 Custom Quest Guide (CQG) is a target-oriented FFXIV plugin for answering a practical question: **what do I still need, and what should I do next?**
 

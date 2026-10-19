@@ -96,16 +96,31 @@ public sealed partial class Plugin
             pinnedItemQuantityCounts.Remove(id);
     }
 
+    // Quest/unlock events update both Watchlist and the prepared Focused Tracking
+    // snapshot. Queue a short, coalesced refresh AFTER the game has committed the
+    // quest state; never resolve targets or access textures inside event callbacks.
+    private void QueuePinnedGuidanceRefresh()
+    {
+        nextPinnedUiRefreshUtc = DateTime.MinValue;
+        if (config.PinnedTargets.Any(pin => pin.FocusedTrackingEnabled))
+            nextFocusedGuidanceRefreshUtc = DateTime.UtcNow.AddMilliseconds(300);
+    }
+
     private void OnPinnedInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
     {
         if (!ClientState.IsLoggedIn || config.PinnedTargets.Count == 0) return;
         RebuildCompletionIndexIfNeeded();
+        var focusedOwnershipChanged = false;
         foreach (var change in events)
         {
             var itemId = change.Item.BaseItemId;
             if (itemId == 0) continue;
             if (completionItemIndex.ContainsKey(itemId))
                 pendingCompletionItems.Add(itemId);
+            if (!focusedOwnershipChanged &&
+                ((completionItemIndex.TryGetValue(itemId, out var itemPins) && itemPins.Any(pin => pin.FocusedTrackingEnabled)) ||
+                 (completionSetMemberIndex.TryGetValue(itemId, out var memberPins) && memberPins.Any(pin => pin.FocusedTrackingEnabled))))
+                focusedOwnershipChanged = true;
             if (linkedParentItemIndex.TryGetValue(itemId, out var linkedDependents))
                 foreach (var dependent in linkedDependents)
                     pendingEventCompletionPins.Add(dependent);
@@ -115,6 +130,8 @@ public sealed partial class Plugin
             if (ownership.TryGetJobForSoulCrystal(itemId, out var jobId))
                 QueueJobCompletionCheck(jobId);
         }
+        if (focusedOwnershipChanged)
+            QueuePinnedGuidanceRefresh();
     }
 
     private void ProcessPendingPinnedCompletions()
@@ -206,6 +223,7 @@ public sealed partial class Plugin
     private void QueueJobCompletionCheck(uint classJobId)
     {
         if (!ClientState.IsLoggedIn || classJobId == 0) return;
+        QueuePinnedGuidanceRefresh();
         QueueLinkedPrerequisitesForParent("JobUnlock", classJobId);
         QueueLinkedPrerequisitesForParent("JobProgression", classJobId);
         foreach (var pin in config.PinnedTargets)
@@ -223,6 +241,7 @@ public sealed partial class Plugin
     private void QueuePinnedUnlockVerification()
     {
         if (!ClientState.IsLoggedIn) return;
+        QueuePinnedGuidanceRefresh();
         foreach (var pin in config.PinnedTargets)
             if (pin.Kind == "JobUnlock" || pin.Kind == "JobProgression")
                 pendingEventCompletionPins.Add(pin);
@@ -240,6 +259,7 @@ public sealed partial class Plugin
     private void OnPinnedTerritoryChanged(uint territoryId)
     {
         if (!ClientState.IsLoggedIn) return;
+        QueuePinnedGuidanceRefresh();
         // Territory changes are infrequent. Unlock/duty checks use the existing
         // authoritative completion predicate; entering a duty is not proof of unlock.
         foreach (var pin in config.PinnedTargets)

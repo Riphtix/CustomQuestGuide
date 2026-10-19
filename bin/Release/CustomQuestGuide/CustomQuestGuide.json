@@ -2,7 +2,7 @@
   "Author": "Riphtix",
   "Name": "Custom Quest Guide",
   "InternalName": "CustomQuestGuide",
-  "AssemblyVersion": "1.4.0.0",
+  "AssemblyVersion": "1.4.0.1",
   "Description": "Custom Quest Guide helps you work toward the items, unlocks, and achievements you want in FFXIV. Search for gear, mounts, minions, titles, duties, jobs, relics, and curated sets; see acquisition methods and prerequisites; and pin your goals for quick access. Follow quest and NPC guidance, use map pins and duty shortcuts where available, and see which targets you already own or have unlocked.",
   "ApplicableVersion": "any",
   "Tags": [
